@@ -294,17 +294,22 @@ export async function warpPerspective(
           return;
         }
 
-        // Decide: use CPU inverse-map or GPU affine-split
-        // For images where homography matters (large distortion), use CPU.
-        // For large images, use affine split (faster).
+        // Decide: use CPU inverse-map (accurate) or affine-split (fast but less accurate
+        // at steep perspective angles). Full homography handles documents photographed
+        // from any angle. Affine split is only accurate for near-orthogonal shots (<15°).
+        //
+        // Threshold 4MP: fast enough on mobile for preview/export, accurate for most crops.
+        // Larger outputs (print-quality A4 at 300dpi) use affine split — still acceptable
+        // for documents without extreme perspective distortion.
         const pixels = outputW * outputH;
         let resultDataUrl: string;
 
-        if (pixels > 2_000_000) {
-          // Large image: affine split (fast, adequate for modest angles)
+        if (pixels > 4_000_000) {
+          // Large output: affine split (fast; acceptable for modest angles)
           resultDataUrl = affineTriangleFallback(img, srcPts, outputW, outputH);
         } else {
           // Full homography: inverse mapping with bilinear interpolation
+          // Handles extreme angles correctly, e.g. document photographed at 45°
           const srcData = srcCtx.getImageData(0, 0, iw, ih);
           const dstData = warpPerspectiveCPU(srcData, H_inv, outputW, outputH);
 

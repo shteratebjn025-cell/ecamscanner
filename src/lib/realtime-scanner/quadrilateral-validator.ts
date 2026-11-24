@@ -59,9 +59,9 @@ export function validateQuadrilateral(
     if (Math.hypot(b.x - a.x, b.y - a.y) < 10) return false;
   }
 
-  // 5. Area must be at least 5% of the frame
+  // 5. Area must be at least 4% of the frame
   const area = quadArea(pts);
-  const minArea = videoW * videoH * 0.05;
+  const minArea = videoW * videoH * 0.04;
   if (area < minArea) return false;
 
   // 6. Aspect ratio must be sane (not degenerate or extreme)

@@ -62,11 +62,11 @@ export interface StabilityConfig {
 }
 
 export const DEFAULT_STABILITY_CONFIG: StabilityConfig = {
-  minimumStableFrames: 6,
-  maximumCornerDisplacement: 0.025,
-  minimumConfidence: 0.35,
-  maximumAreaVariation: 0.10,
-  stableDurationMs: 800,
+  minimumStableFrames: 4,
+  maximumCornerDisplacement: 0.012,
+  minimumConfidence: 0.38,
+  maximumAreaVariation: 0.06,
+  stableDurationMs: 600,
 };
 
 export interface StabilityResult {

@@ -31,7 +31,7 @@ export interface AutoCaptureConfig {
 export const DEFAULT_AUTO_CAPTURE_CONFIG: AutoCaptureConfig = {
   enabled: true,
   cooldownMs: 2000,
-  minConfidence: 0.35,
+  minConfidence: 0.38,
 };
 
 // ─── Controller ───────────────────────────────────────────────────────────────

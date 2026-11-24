@@ -3,7 +3,7 @@ import { useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { ScannedPage, CropRegion, FilterId, AppStep, EnhancementSettings } from '@/types';
 import { defaultEnhancementSettings, normalizeFilterId } from '@/types';
-import { detectEdges, defaultCropRegion } from '@/lib/image-processing/edge-detection';
+import { detectEdges, detectEdgesFull, defaultCropRegion } from '@/lib/image-processing/edge-detection';
 import { perspectiveCrop } from '@/lib/image-processing/crop';
 import { applyFilter } from '@/lib/image-processing/filters';
 import { saveDocumentEverywhere } from '@/lib/storage/documents';
@@ -86,8 +86,28 @@ export function useScanner() {
       let finalCrop: CropRegion;
 
       if (detectedCrop) {
-        finalCrop = detectedCrop;
+        // Realtime corners are in video pixel coordinates. The captured JPEG is drawn
+        // at video.videoWidth × video.videoHeight (see frame-capture.ts), so coordinates
+        // are already in the correct space for the captured image.
+        //
+        // Run a full-resolution re-detection pass to refine corner accuracy.
+        // The realtime proxy (400px) can mis-locate corners by several pixels at scale.
+        // The full-res detector uses DETECTION_MAX_DIM=480px with better coverage.
+        const fullResResult = await detectEdgesFull(dataUrl);
+        if (
+          fullResResult.status !== 'not-found' &&
+          fullResResult.selected &&
+          fullResResult.selected.confidence >= 0.40
+        ) {
+          // Full-res detection succeeded — use these corners (more accurate)
+          const [tl, tr, br, bl] = fullResResult.selected.corners;
+          finalCrop = { topLeft: tl, topRight: tr, bottomRight: br, bottomLeft: bl };
+        } else {
+          // Full-res detection failed or low confidence — use realtime corners as-is
+          finalCrop = detectedCrop;
+        }
       } else {
+        // No realtime crop — run full detection on the captured image
         const crop = await detectEdges(dataUrl, img.naturalWidth, img.naturalHeight);
         finalCrop = crop ?? defaultCropRegion(img.naturalWidth, img.naturalHeight);
       }

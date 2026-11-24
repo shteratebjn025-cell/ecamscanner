@@ -87,13 +87,16 @@ function detectDocument(img: HTMLImageElement): DetectionResult {
   // 2. Gaussian blur 5×5
   const blurred = gaussianBlur5(gray, W, H);
 
-  // 3. Sobel + NMS + hysteresis
+  // 3. Sobel + NMS + hysteresis (lower thresholds to catch weak document edges)
   const { mag, dir } = sobelGradient(blurred, W, H);
   const suppressed   = nonMaxSuppression(mag, dir, W, H);
-  const edges        = hysteresis(suppressed, W, H, 0.07, 0.20);
+  const edges        = hysteresis(suppressed, W, H, 0.05, 0.14);
 
-  // 4. Find quadrilateral candidates
-  const candidates = findQuadCandidates(edges, gray, W, H);
+  // 4. Morphological dilation — closes gaps in broken edges (shadows, folds, low contrast)
+  const dilated = dilateEdges(edges, W, H);
+
+  // 5. Find quadrilateral candidates
+  const candidates = findQuadCandidates(dilated, gray, W, H);
 
   if (candidates.length === 0) {
     return { candidates: [], status: 'not-found', warnings: ['No quadrilateral candidates found'] };
@@ -122,6 +125,30 @@ function detectDocument(img: HTMLImageElement): DetectionResult {
     status,
     warnings,
   };
+}
+
+// ─── Morphological dilation ───────────────────────────────────────────────────
+
+/**
+ * 3×3 cross dilation — closes small gaps in Canny edge output.
+ * Identical to the implementation in document-detector.ts and the worker.
+ */
+function dilateEdges(edges: Uint8Array, W: number, H: number): Uint8Array {
+  const out = new Uint8Array(W * H);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      if (
+        edges[y * W + x] ||
+        edges[(y - 1) * W + x] ||
+        edges[(y + 1) * W + x] ||
+        edges[y * W + (x - 1)] ||
+        edges[y * W + (x + 1)]
+      ) {
+        out[y * W + x] = 1;
+      }
+    }
+  }
+  return out;
 }
 
 // ─── Quadrilateral finder ─────────────────────────────────────────────────────
@@ -452,9 +479,10 @@ export function detectDocumentRealtime(video: HTMLVideoElement): CropRegion | nu
   const blurred    = gaussianBlur5(gray, W, H);
   const { mag, dir } = sobelGradient(blurred, W, H);
   const suppressed = nonMaxSuppression(mag, dir, W, H);
-  const edges      = hysteresis(suppressed, W, H, 0.07, 0.18);
+  const edges      = hysteresis(suppressed, W, H, 0.05, 0.14);
+  const dilated    = dilateEdges(edges, W, H);
 
-  const candidates = findQuadCandidates(edges, gray, W, H);
+  const candidates = findQuadCandidates(dilated, gray, W, H);
   if (candidates.length === 0) return null;
 
   const best = candidates.sort((a, b) => b.confidence - a.confidence)[0];

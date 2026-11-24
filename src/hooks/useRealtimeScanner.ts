@@ -30,7 +30,7 @@ import type { StabilityConfig } from '@/lib/realtime-scanner/realtime-scanner.ty
 
 import { openCamera, stopStream, setTorch, enumerateCameras, classifyError } from '@/lib/realtime-scanner/camera-manager';
 import type { CameraError, OpenCameraResult } from '@/lib/realtime-scanner/camera-manager';
-import { captureProxyFrame } from '@/lib/realtime-scanner/document-detector';
+import { captureProxyFrame, detectDocumentFromImageData } from '@/lib/realtime-scanner/document-detector';
 import { validateQuadrilateral } from '@/lib/realtime-scanner/quadrilateral-validator';
 import { StabilityDetector } from '@/lib/realtime-scanner/stability-detector';
 import { analyzeQuality } from '@/lib/realtime-scanner/image-quality-analyzer';
@@ -137,6 +137,10 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
   const captureCtrlRef   = useRef(new AutoCaptureController(autoCaptureConfig));
   const workerBridgeRef  = useRef(new ScannerWorkerBridge());
   const lastCornersRef   = useRef<CropRegion | null>(null);
+  // Track last status for the render loop without React state reads (avoids stale closure)
+  const lastStatusRef    = useRef<DetectionStatus>('not-found');
+  // Guard: prevent multiple concurrent detection jobs (mobile can be slow)
+  const detectionRunning = useRef(false);
 
   // ─── Worker init (once) ───────────────────────────────────────────────────
   useEffect(() => {
@@ -168,15 +172,19 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
       syncCanvasSize(overlay, video);
 
       // ── Run detection at configured interval ────────────────────────────
-      if (shouldDetect(now, lastDetectRef.current, detectionIntervalMs)) {
+      if (shouldDetect(now, lastDetectRef.current, detectionIntervalMs) && !detectionRunning.current) {
         lastDetectRef.current = now;
+        detectionRunning.current = true;
 
         // 1. Extract proxy frame
         if (!proxyCanvasRef.current) {
           proxyCanvasRef.current = document.createElement('canvas');
         }
         const proxyResult = captureProxyFrame(video, proxyCanvasRef.current);
-        if (!proxyResult) return;
+        if (!proxyResult) {
+          detectionRunning.current = false;
+          return;
+        }
 
         const { imageData, proxyW, proxyH } = proxyResult;
         const vw = video.videoWidth;
@@ -198,6 +206,7 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
           detResult = await workerBridgeRef.current.detect(freshData, vw, vh);
         } catch {
           detResult = { found: false, confidence: 0, corners: null, status: 'not-found' as const };
+          detectionRunning.current = false;
         }
 
         if (unmountedRef.current) return;
@@ -224,9 +233,15 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
           } else if (stability.stableFrames >= 2) {
             status = 'stabilizing';
           } else {
-            status = 'detecting';
+            status = detResult.status === 'low-confidence' ? 'low-confidence' : 'detecting';
           }
+        } else if (detResult.corners && detResult.status === 'low-confidence') {
+          // Show low-confidence overlay even if quad validation failed on marginal corners
+          status = 'low-confidence';
         }
+
+        // Keep ref in sync for the render loop (avoids stale closure on detectionStatus state)
+        lastStatusRef.current = status;
 
         // 7. Auto capture gate
         const cornersVisible = !!validCorners;
@@ -251,6 +266,14 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
         setHint(qual.hint || (validCorners ? '' : 'Arahkan kamera ke dokumen'));
 
         lastCornersRef.current = validCorners;
+        // For low-confidence display: use raw corners even if quad validation failed
+        if (!validCorners && status === 'low-confidence' && detResult.corners) {
+          lastCornersRef.current = detResult.corners;
+        }
+        // Clear corners when nothing detected so stale corners never linger
+        if (status === 'not-found') {
+          lastCornersRef.current = null;
+        }
 
         // 9. Auto capture trigger
         if (shouldCapture && !captureInFlight.current) {
@@ -260,6 +283,8 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
             if (!unmountedRef.current) executeCapture(video, lastCornersRef.current);
           }, 80); // brief delay for the flash frame to render
         }
+
+        detectionRunning.current = false;
       }
 
       // ── Render overlay every RAF tick ────────────────────────────────────
@@ -267,8 +292,9 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
         drawOverlay(overlay, video, null, 'not-found', true);
         flashFrameRef.current = false;
       } else {
-        const status: DetectionStatus = captureInFlight.current ? 'capturing' : detectionStatus;
-        drawOverlay(overlay, video, lastCornersRef.current, status);
+        // Use ref value (not React state) to avoid stale closure issue
+        const renderStatus: DetectionStatus = captureInFlight.current ? 'capturing' : lastStatusRef.current;
+        drawOverlay(overlay, video, lastCornersRef.current, renderStatus);
       }
     };
 
@@ -381,6 +407,7 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
       cancelAnimationFrame(rafRef.current);
       stopStream(streamRef.current);
       streamRef.current = null;
+      detectionRunning.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

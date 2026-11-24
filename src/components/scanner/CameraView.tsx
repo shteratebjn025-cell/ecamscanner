@@ -48,7 +48,7 @@ function statusLabel(
     case 'detecting':
       return { text: 'Dokumen terdeteksi…', color: 'bg-blue-500/80 text-white' };
     case 'stabilizing': {
-      const pct = Math.min(100, Math.round((stableDurationMs / 800) * 100));
+      const pct = Math.min(100, Math.round((stableDurationMs / 600) * 100));
       return { text: `Menstabilkan… ${pct}%`, color: 'bg-amber-500/80 text-white' };
     }
     case 'ready':
@@ -85,6 +85,7 @@ export default function CameraView({
   const {
     viewState,
     scanState,
+    detectionStatus,
     stableFrames,
     stableDurationMs,
     hint,
@@ -99,6 +100,8 @@ export default function CameraView({
   const label = statusLabel(scanState, stableFrames, stableDurationMs, hint, autoCaptureEnabled);
 
   const isDocDetected = ['detecting', 'stabilizing', 'ready', 'capturing'].includes(scanState);
+  // Show detection indicator also for low-confidence (overlay visible but grey/dashed)
+  const hasAnyDetection = isDocDetected || detectionStatus === 'low-confidence';
 
   return (
     <div className="fixed inset-0 bg-black z-50 flex flex-col">
@@ -243,8 +246,8 @@ export default function CameraView({
             </div>
           )}
 
-          {/* Guide frame — shown when no document is detected */}
-          {!isDocDetected && (
+          {/* Guide frame — shown when no document is detected at all */}
+          {!hasAnyDetection && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div
                 className="border-2 border-dashed border-white/25 rounded-xl"

@@ -1,10 +1,10 @@
 /**
- * realtime-scanner.worker.ts
+ * realtime-scanner.worker.ts  — v3.0
  *
  * Web Worker that runs the document detection pipeline off the main thread.
+ * Synced with document-detector.ts v3.0 (morphological dilation, corner clustering).
  *
- * Protocol (all messages are transferable where possible):
- *
+ * Protocol:
  * Main → Worker:
  *   { type: 'DETECT',  jobId, imageData, originalWidth, originalHeight }
  *   { type: 'CANCEL',  jobId }
@@ -14,14 +14,6 @@
  *   { type: 'READY',  jobId: '' }
  *   { type: 'RESULT', jobId, result: RealtimeDetectionResult }
  *   { type: 'ERROR',  jobId, error: string }
- *
- * The worker signals READY immediately on startup so the main thread
- * knows initialisation is complete.
- *
- * NOTE: This file intentionally inlines the full Canny pipeline rather than
- * importing from document-detector.ts because Next.js / Webpack bundle workers
- * as separate chunks and circular dynamic imports can break in some
- * environments.  The numeric logic is identical to document-detector.ts.
  */
 
 /// <reference lib="webworker" />
@@ -29,8 +21,7 @@
 import type { ScanWorkerIncoming, ScanWorkerOutgoing, RealtimeDetectionResult, DetectionStatus } from './realtime-scanner.types';
 import type { CropRegion, Point } from '@/types';
 
-// ─── Signal ready ─────────────────────────────────────────────────────────────
-
+// Signal ready immediately
 const readyMsg: ScanWorkerOutgoing = { type: 'READY', jobId: '' };
 self.postMessage(readyMsg);
 
@@ -39,15 +30,8 @@ self.postMessage(readyMsg);
 self.addEventListener('message', (event: MessageEvent<ScanWorkerIncoming>) => {
   const msg = event.data;
 
-  if (msg.type === 'DISPOSE') {
-    self.close();
-    return;
-  }
-
-  if (msg.type === 'CANCEL') {
-    // No async work in flight — nothing to cancel
-    return;
-  }
+  if (msg.type === 'DISPOSE') { self.close(); return; }
+  if (msg.type === 'CANCEL') return;
 
   if (msg.type === 'DETECT') {
     try {
@@ -68,10 +52,10 @@ self.addEventListener('message', (event: MessageEvent<ScanWorkerIncoming>) => {
   }
 });
 
-// ─── Detection pipeline (inlined for worker isolation) ────────────────────────
+// ─── Detection pipeline ───────────────────────────────────────────────────────
 
-const MIN_CONFIDENCE = 0.20;
-const CONFIDENCE_STABLE = 0.40;
+const MIN_CONFIDENCE_SHOW  = 0.15;
+const MIN_CONFIDENCE_FOUND = 0.22;
 
 function runDetection(
   imageData: ImageData,
@@ -90,10 +74,11 @@ function runDetection(
   const blurred    = gaussianBlur5(gray, W, H);
   const { mag, dir } = sobelGradient(blurred, W, H);
   const suppressed = nonMaxSuppression(mag, dir, W, H);
-  const edges      = hysteresis(suppressed, W, H, 0.07, 0.18);
-  const best       = findBestQuad(edges, W, H);
+  const edges      = hysteresis(suppressed, W, H, 0.05, 0.14);
+  const dilated    = dilate(edges, W, H);
+  const best       = findBestQuad(dilated, W, H);
 
-  if (!best || best.confidence < MIN_CONFIDENCE) {
+  if (!best || best.confidence < MIN_CONFIDENCE_SHOW) {
     return { found: false, confidence: 0, corners: null, status: 'not-found' };
   }
 
@@ -107,9 +92,14 @@ function runDetection(
     bottomLeft:  { x: bl.x * sx, y: bl.y * sy },
   };
 
-  const status: DetectionStatus = 'detecting';
+  const status: DetectionStatus = best.confidence >= MIN_CONFIDENCE_FOUND ? 'detecting' : 'low-confidence';
 
-  return { found: true, confidence: best.confidence, corners, status };
+  return {
+    found: best.confidence >= MIN_CONFIDENCE_FOUND,
+    confidence: best.confidence,
+    corners,
+    status,
+  };
 }
 
 // ─── Canny pipeline ───────────────────────────────────────────────────────────
@@ -218,6 +208,24 @@ function hysteresis(mag: Float32Array, W: number, H: number, lo: number, hi: num
   return edges;
 }
 
+function dilate(edges: Uint8Array, W: number, H: number): Uint8Array {
+  const out = new Uint8Array(W * H);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      if (
+        edges[y * W + x] ||
+        edges[(y - 1) * W + x] ||
+        edges[(y + 1) * W + x] ||
+        edges[y * W + (x - 1)] ||
+        edges[y * W + (x + 1)]
+      ) {
+        out[y * W + x] = 1;
+      }
+    }
+  }
+  return out;
+}
+
 // ─── Quad finder ──────────────────────────────────────────────────────────────
 
 function isConvex(pts: Point[]): boolean {
@@ -269,19 +277,25 @@ function edgeSupport(edges: Uint8Array, W: number, H: number, pts: Point[]): num
 }
 
 function computeConfidence(areaRatio: number, support: number, ar: number): number {
-  const areaScore = Math.min(1, areaRatio / 0.5) * 0.4;
-  const edgeScore = support * 0.4;
-  const arTargets = [1.41, 1.29, 1.59, 1.0, 2.0];
-  const arScore   = Math.max(...arTargets.map(t => Math.max(0, 1 - Math.abs(ar - t) / 2))) * 0.2;
+  const areaScore = Math.min(1, areaRatio / 0.45) * 0.4;
+  const edgeScore = support * 0.45;
+  const arTargets = [1.41, 1.29, 1.59, 0.77, 1.0, 2.0];
+  const arScore   = Math.max(...arTargets.map(t => Math.max(0, 1 - Math.abs(ar - t) / 1.5))) * 0.15;
   return Math.min(1, areaScore + edgeScore + arScore);
 }
 
-function isCornersVisible(pts: Point[], W: number, H: number): boolean {
-  const margin = Math.min(W, H) * 0.03;
-  for (const p of pts) {
-    if (p.x < margin || p.y < margin || p.x > W - margin || p.y > H - margin) return false;
-  }
-  return true;
+function clusterCorner(
+  pts: Array<{ x: number; y: number; score: number }>,
+  maxN: number,
+): Point {
+  if (pts.length === 0) return { x: 0, y: 0 };
+  const top = pts.slice(0, maxN);
+  const seed = top[0];
+  const radius = 20;
+  const cluster = top.filter(p => Math.hypot(p.x - seed.x, p.y - seed.y) <= radius);
+  const cx = cluster.reduce((s, p) => s + p.x, 0) / cluster.length;
+  const cy = cluster.reduce((s, p) => s + p.y, 0) / cluster.length;
+  return { x: Math.round(cx), y: Math.round(cy) };
 }
 
 function findBestQuad(
@@ -290,50 +304,58 @@ function findBestQuad(
   H: number,
 ): { corners: [Point, Point, Point, Point]; confidence: number } | null {
   const cx = W / 2, cy = H / 2;
-  const quadrantPts: Point[][] = [[], [], [], []];
+  const margin = Math.min(W, H) * 0.04;
+  const dirX = [-1, 1, 1, -1];
+  const dirY = [-1, -1, 1, 1];
+
+  const quadrantPts: Array<{ x: number; y: number; score: number }>[] = [[], [], [], []];
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
       if (!edges[y * W + x]) continue;
+      if (x < margin || y < margin || x > W - margin || y > H - margin) continue;
       const qi = (x >= cx ? 1 : 0) + (y >= cy ? 2 : 0);
-      quadrantPts[qi].push({ x, y });
+      const score = dirX[qi] * (x - cx) + dirY[qi] * (y - cy);
+      quadrantPts[qi].push({ x, y, score });
     }
   }
-  const totalEdges = quadrantPts.reduce((s, q) => s + q.length, 0);
-  if (totalEdges < W * H * 0.002) return null;
 
-  const N = 10;
-  const dirX = [-1, 1, 1, -1];
-  const dirY = [-1, -1, 1, 1];
-  const candidatePts = quadrantPts.map((pts, qi) =>
-    pts
-      .map(p => ({ ...p, score: dirX[qi] * (p.x - cx) + dirY[qi] * (p.y - cy) }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, N)
-  );
-  if (candidatePts.some(c => c.length === 0)) return null;
+  const totalEdges = quadrantPts.reduce((s, q) => s + q.length, 0);
+  if (totalEdges < W * H * 0.0015) return null;
+
+  for (const pts of quadrantPts) pts.sort((a, b) => b.score - a.score);
+  if (quadrantPts.some(q => q.length === 0)) return null;
+
+  const CANDIDATES_PER_QUAD = 4;
+  const cornerCandidates: Point[][] = quadrantPts.map(pts => {
+    const result: Point[] = [clusterCorner(pts, 30)];
+    for (let offset = 10; offset <= 30 && offset < pts.length; offset += 10) {
+      result.push(clusterCorner(pts.slice(offset), 20));
+    }
+    return result.slice(0, CANDIDATES_PER_QUAD);
+  });
 
   let bestConf = -1;
   let bestCorners: [Point, Point, Point, Point] | null = null;
 
-  for (const tl of candidatePts[0]) {
-    for (const tr of candidatePts[1]) {
-      for (const br of candidatePts[2]) {
-        for (const bl of candidatePts[3]) {
+  for (const tl of cornerCandidates[0]) {
+    for (const tr of cornerCandidates[1]) {
+      for (const br of cornerCandidates[2]) {
+        for (const bl of cornerCandidates[3]) {
           const pts = [tl, tr, br, bl];
-          const area = quadArea(pts);
-          const areaRatio = area / (W * H);
-          if (areaRatio < 0.08) continue;
-          if (!isConvex(pts)) continue;
-          if (!isCornersVisible(pts, W, H)) continue;
           const topW    = Math.hypot(tr.x - tl.x, tr.y - tl.y);
           const bottomW = Math.hypot(br.x - bl.x, br.y - bl.y);
           const leftH   = Math.hypot(bl.x - tl.x, bl.y - tl.y);
           const rightH  = Math.hypot(br.x - tr.x, br.y - tr.y);
+          if (topW < 15 || bottomW < 15 || leftH < 15 || rightH < 15) continue;
           const avgW = (topW + bottomW) / 2;
           const avgH = (leftH + rightH) / 2;
-          if (avgW < 10 || avgH < 10) continue;
           const ar = avgW / avgH;
-          if (ar < 0.1 || ar > 10) continue;
+          if (ar < 0.12 || ar > 8) continue;
+          const area = quadArea(pts);
+          const areaRatio = area / (W * H);
+          if (areaRatio < 0.06) continue;
+          if (!isConvex(pts)) continue;
+          if (pts.some(p => p.x < 0 || p.y < 0 || p.x >= W || p.y >= H)) continue;
           const support    = edgeSupport(edges, W, H, pts);
           const confidence = computeConfidence(areaRatio, support, ar);
           if (confidence > bestConf) {
@@ -345,6 +367,6 @@ function findBestQuad(
     }
   }
 
-  if (!bestCorners || bestConf < 0.1) return null;
+  if (!bestCorners || bestConf < 0.08) return null;
   return { corners: bestCorners, confidence: bestConf };
 }
