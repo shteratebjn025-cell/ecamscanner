@@ -56,7 +56,7 @@ export const DEFAULT_DOC_NAME_PREFIX = 'Scan';
 // ─── Processing limits ────────────────────────────────────────────────────────
 
 /** Max dimension for preview processing — fast path */
-export const PREVIEW_MAX_DIM = 1200;
+export const PREVIEW_MAX_DIM = 1800;
 
 /** Max dimension for export processing — quality path */
 export const EXPORT_MAX_DIM = 4000;

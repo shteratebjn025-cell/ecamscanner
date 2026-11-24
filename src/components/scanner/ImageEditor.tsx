@@ -139,7 +139,8 @@ export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBac
       const h = Math.max(100, Math.round(Math.max(
         Math.hypot(bl.x-tl.x, bl.y-tl.y), Math.hypot(br.x-tr.x, br.y-tr.y),
       )));
-      const cropped  = await perspectiveCrop(current.originalDataUrl, cropRegion, w, h, 'preview');
+      // Use 'export' profile to preserve full source resolution
+      const cropped  = await perspectiveCrop(current.originalDataUrl, cropRegion, w, h, 'export');
       const filtered = await applyFilter(cropped, current.filter, current.enhancementSettings);
       setCurrent(prev => ({
         ...prev,

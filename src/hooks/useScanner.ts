@@ -411,7 +411,7 @@ async function processCrop(imageDataUrl: string, crop: CropRegion): Promise<Scan
     bottomLeft:  { x: clamp(bl.x, 0, imgW), y: clamp(bl.y, 0, imgH) },
   };
 
-  const cropped   = await perspectiveCrop(imageDataUrl, safeCrop, w, h, 'preview');
+  const cropped   = await perspectiveCrop(imageDataUrl, safeCrop, w, h, 'export');
   const processed = await applyFilter(cropped, 'auto');
   const defaults  = defaultEnhancementSettings();
 
