@@ -4,7 +4,6 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
 
-  // Izinkan gambar dari Supabase Storage
   images: {
     remotePatterns: [
       {
@@ -13,6 +12,10 @@ const nextConfig: NextConfig = {
         pathname: '/storage/v1/object/public/**',
       },
     ],
+  },
+
+  turbopack: {
+    root: __dirname,
   },
 };
 
