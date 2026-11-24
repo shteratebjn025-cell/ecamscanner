@@ -1,6 +1,9 @@
 'use client';
-import { useRef, useState, useEffect } from 'react';
-import { Camera, Upload, ScanLine, FileText, Zap, Shield, ChevronRight, X } from 'lucide-react';
+import { useRef, useState, useEffect, useCallback } from 'react';
+import {
+  Camera, Upload, ScanLine, FileText, Zap, Shield,
+  ChevronRight, X,
+} from 'lucide-react';
 import AppShell from '@/components/layout/AppShell';
 import RecentDocuments from '@/components/dashboard/RecentDocuments';
 import CameraView from '@/components/scanner/CameraView';
@@ -8,11 +11,13 @@ import CropEditor from '@/components/scanner/CropEditor';
 import ImageEditor from '@/components/scanner/ImageEditor';
 import PageManager from '@/components/scanner/PageManager';
 import ExportModal from '@/components/scanner/ExportModal';
+import OcrPanel from '@/components/scanner/OcrPanel';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import Modal from '@/components/ui/Modal';
 import Button from '@/components/ui/Button';
 import { useScanner } from '@/hooks/useScanner';
-import type { DocumentRecord } from '@/types';
+import { updateDocumentOcr } from '@/lib/storage/documents';
+import type { DocumentRecord, OcrStatus } from '@/types';
 
 export default function ScannerApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -25,20 +30,24 @@ export default function ScannerApp() {
     handleCropConfirmed,
     handlePageSaved,
     handleDeletePage,
+    handleDuplicatePage,
     handleReorderPage,
     handleEditPage,
     handleAddPage,
+    handleBatchApplyFilter,
     handleSaveDocument,
     handleGalleryFiles,
     reset,
     updateDocumentName,
   } = useScanner();
 
-  const [showExport, setShowExport] = useState(false);
-  const [reopenDoc, setReopenDoc]   = useState<DocumentRecord | null>(null);
-  const [sourceModal, setSourceModal] = useState(false);
+  const [showExport,    setShowExport]    = useState(false);
+  const [showOcr,       setShowOcr]       = useState(false);
+  const [reopenDoc,     setReopenDoc]     = useState<DocumentRecord | null>(null);
+  const [sourceModal,   setSourceModal]   = useState(false);
+  const [currentDocId,  setCurrentDocId]  = useState<string | null>(null);
 
-  // Auto-dismiss errors after 4 seconds
+  // Auto-dismiss errors after 4 s
   useEffect(() => {
     if (!state.error) return;
     const t = setTimeout(clearError, 4000);
@@ -46,52 +55,42 @@ export default function ScannerApp() {
   }, [state.error, clearError]);
 
   function handleScanButton() {
-    if (state.pages.length > 0) {
-      setStep('pages');
-    } else {
-      setSourceModal(true);
-    }
+    if (state.pages.length > 0) setStep('pages');
+    else setSourceModal(true);
   }
 
-  function handleSelectCamera() {
-    setSourceModal(false);
-    setStep('camera');
-  }
-
-  function handleSelectGallery() {
-    setSourceModal(false);
-    fileInputRef.current?.click();
-  }
+  function handleSelectCamera() { setSourceModal(false); setStep('camera'); }
+  function handleSelectGallery() { setSourceModal(false); fileInputRef.current?.click(); }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
-    if (files && files.length > 0) {
-      handleGalleryFiles(files);
-    }
+    if (files && files.length > 0) handleGalleryFiles(files);
     e.target.value = '';
   }
 
   function handleOpenDoc(doc: DocumentRecord) {
     loadPages(doc.pages, doc.name);
+    setCurrentDocId(doc.id);
     setReopenDoc(null);
     setShowExport(true);
   }
 
-  function handleExportClose() {
-    setShowExport(false);
-  }
+  // OCR page update — write to in-memory state only here; db write happens in ExportModal save
+  const handleOcrUpdate = useCallback((pageId: string, status: OcrStatus, text: string) => {
+    // Update in running scanner state via loadPages trick — handled per page
+    // Also persist to IndexedDB if we have a saved doc id
+    if (currentDocId) {
+      updateDocumentOcr(currentDocId, pageId, status, text).catch(() => {});
+    }
+  }, [currentDocId]);
 
-  function handleExportDone() {
-    setShowExport(false);
-    reset();
-  }
-
-  // ─── Hidden file input — always present ─────────────────────────────────
+  // ─── Hidden file input ───────────────────────────────────────────────────
   const fileInputEl = (
     <input
       ref={fileInputRef}
       type="file"
       accept="image/jpeg,image/jpg,image/png,image/webp"
+      multiple
       className="hidden"
       onChange={handleFileChange}
     />
@@ -104,7 +103,7 @@ export default function ScannerApp() {
         <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center">
           <div className="bg-white rounded-2xl p-6 flex flex-col items-center gap-3 shadow-xl mx-6">
             <LoadingSpinner size="lg" />
-            <p className="text-gray-700 font-medium text-sm">Memproses gambar...</p>
+            <p className="text-gray-700 font-medium text-sm">{state.processingLabel}</p>
           </div>
         </div>
       )}
@@ -112,7 +111,7 @@ export default function ScannerApp() {
         <div className="fixed top-4 left-4 right-4 z-[70] max-w-md mx-auto">
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 shadow-lg flex items-start gap-2">
             <p className="text-red-700 text-sm flex-1">{state.error}</p>
-            <button onClick={clearError} className="text-red-400 hover:text-red-600 mt-0.5">
+            <button onClick={clearError} className="text-red-400 hover:text-red-600 mt-0.5 flex-shrink-0">
               <X size={16} />
             </button>
           </div>
@@ -121,7 +120,7 @@ export default function ScannerApp() {
     </>
   );
 
-  // ─── Scanner step render branches ────────────────────────────────────────
+  // ─── Step branches ────────────────────────────────────────────────────────
 
   if (state.step === 'camera') {
     return (
@@ -160,10 +159,7 @@ export default function ScannerApp() {
             </div>
           </button>
           <button
-            onClick={() => {
-              setStep('dashboard');
-              setTimeout(() => fileInputRef.current?.click(), 100);
-            }}
+            onClick={() => { setStep('dashboard'); setTimeout(() => fileInputRef.current?.click(), 100); }}
             className="w-full max-w-xs flex items-center gap-4 p-4 bg-white rounded-2xl active:bg-gray-50"
           >
             <div className="bg-green-600 p-3 rounded-xl">
@@ -174,9 +170,7 @@ export default function ScannerApp() {
               <p className="text-sm text-gray-500">JPG, PNG, WEBP</p>
             </div>
           </button>
-          <button onClick={() => setStep('pages')} className="text-white/70 text-sm mt-2">
-            Batal
-          </button>
+          <button onClick={() => setStep('pages')} className="text-white/70 text-sm mt-2">Batal</button>
         </div>
       </>
     );
@@ -223,25 +217,54 @@ export default function ScannerApp() {
           pages={state.pages}
           onAddPage={handleAddPage}
           onDeletePage={handleDeletePage}
+          onDuplicatePage={handleDuplicatePage}
           onEditPage={handleEditPage}
           onReorderPage={handleReorderPage}
+          onBatchApplyFilter={handleBatchApplyFilter}
           onFinish={() => setShowExport(true)}
-          onBack={() => reset()}
+          onBack={reset}
         />
+
+        {/* Export modal */}
         <ExportModal
           open={showExport}
           pages={state.pages}
           documentName={state.documentName}
           onNameChange={updateDocumentName}
           onSave={handleSaveDocument}
-          onClose={handleExportClose}
-          onDone={handleExportDone}
+          onClose={() => setShowExport(false)}
+          onDone={() => { setShowExport(false); reset(); }}
         />
+
+        {/* OCR modal */}
+        <Modal
+          open={showOcr}
+          onClose={() => setShowOcr(false)}
+          title="OCR — Ekstrak Teks"
+        >
+          <OcrPanel
+            pages={state.pages}
+            onUpdatePage={handleOcrUpdate}
+          />
+        </Modal>
+
+        {/* Floating OCR + Export buttons when export closed */}
+        {!showExport && !showOcr && (
+          <div className="fixed bottom-20 right-4 z-40 flex flex-col gap-2">
+            <button
+              onClick={() => setShowOcr(true)}
+              className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-full shadow-lg shadow-indigo-200 text-sm font-medium active:scale-95 transition-transform"
+            >
+              <FileText size={16} />
+              OCR
+            </button>
+          </div>
+        )}
       </>
     );
   }
 
-  // ─── Dashboard ───────────────────────────────────────────────────────────
+  // ─── Dashboard ────────────────────────────────────────────────────────────
   return (
     <AppShell>
       {fileInputEl}
@@ -256,7 +279,7 @@ export default function ScannerApp() {
             </div>
             <div>
               <h1 className="font-bold text-gray-900 text-lg leading-none">ECamScanner</h1>
-              <p className="text-xs text-gray-500">Free · No Watermark</p>
+              <p className="text-xs text-gray-500">Free · No Watermark · v2.0</p>
             </div>
           </div>
           {state.pages.length > 0 && (
@@ -318,7 +341,7 @@ export default function ScannerApp() {
           </div>
           <div className="text-left">
             <p className="font-semibold text-gray-900 text-sm">Upload</p>
-            <p className="text-xs text-gray-500">Dari galeri</p>
+            <p className="text-xs text-gray-500">Multi-file JPG/PNG</p>
           </div>
         </button>
       </div>
@@ -367,11 +390,17 @@ export default function ScannerApp() {
               {reopenDoc.pageCount} halaman · Dibuat{' '}
               {new Date(reopenDoc.createdAt).toLocaleDateString('id-ID', { dateStyle: 'long' })}
             </p>
-            <Button variant="primary" size="lg" className="w-full" onClick={() => handleOpenDoc(reopenDoc)}>
+            <Button
+              variant="primary" size="lg" className="w-full"
+              onClick={() => handleOpenDoc(reopenDoc)}
+            >
               <FileText size={18} />
               Buka &amp; Ekspor
             </Button>
-            <Button variant="ghost" size="md" className="w-full text-gray-500" onClick={() => setReopenDoc(null)}>
+            <Button
+              variant="ghost" size="md" className="w-full text-gray-500"
+              onClick={() => setReopenDoc(null)}
+            >
               Tutup
             </Button>
           </div>
@@ -402,7 +431,7 @@ export default function ScannerApp() {
             </div>
             <div className="text-left">
               <p className="font-semibold text-gray-900">Galeri / Upload</p>
-              <p className="text-sm text-gray-500">JPG, PNG, WEBP</p>
+              <p className="text-sm text-gray-500">Multi-file JPG, PNG, WEBP</p>
             </div>
           </button>
         </div>

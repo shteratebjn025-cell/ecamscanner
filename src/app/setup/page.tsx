@@ -56,7 +56,7 @@ export default function SetupPage() {
           <h2>Install di iOS / iPadOS</h2>
           <ol>
             <li>Setelah download, buka <b>Pengaturan</b></li>
-            <li>Akan muncul notifikasi <b>"Profil telah diunduh"</b> — ketuk</li>
+            <li>Akan muncul notifikasi <b>&quot;Profil telah diunduh&quot;</b> — ketuk</li>
             <li>Ketuk <b>Pasang</b> di sudut kanan atas, masukkan passcode</li>
             <li>Buka <b>Pengaturan → Umum → Tentang → Pengaturan Kepercayaan Sertifikat</b></li>
             <li>Aktifkan toggle di sebelah <b>mkcert...</b></li>
@@ -67,6 +67,7 @@ export default function SetupPage() {
         <div className="card">
           <span className="tag">Langkah 3</span>
           <h2>Buka Aplikasi</h2>
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
           <a className="btn2" href="/">
             🔙 Kembali ke ECamScanner
           </a>

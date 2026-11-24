@@ -1,6 +1,8 @@
 'use client';
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { SwitchCamera, X, Image as ImageIcon, Zap, ZapOff, AlertCircle, RefreshCw, FlipHorizontal } from 'lucide-react';
+import {
+  X, Image as ImageIcon, Zap, ZapOff, AlertCircle, RefreshCw, FlipHorizontal,
+} from 'lucide-react';
 import Button from '@/components/ui/Button';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { CropRegion } from '@/types';
@@ -166,6 +168,7 @@ export default function CameraView({ onCapture, onClose, onGalleryFallback }: Ca
     startDetectionLoop();
   }, [startDetectionLoop]);
 
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     unmountedRef.current = false;
     openCamera('environment');
@@ -177,6 +180,7 @@ export default function CameraView({ onCapture, onClose, onGalleryFallback }: Ca
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function handleCapture() {
     const video = videoRef.current;

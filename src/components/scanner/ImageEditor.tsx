@@ -1,13 +1,18 @@
 'use client';
-import { useState, useCallback } from 'react';
-import { RotateCcw, RotateCw, Crop, Check, ChevronLeft } from 'lucide-react';
-import type { FilterMode, ScannedPage, CropRegion } from '@/types';
+import { useState, useCallback, useRef } from 'react';
+import {
+  RotateCcw, RotateCw, Crop, Check, ChevronLeft,
+  SlidersHorizontal, Layers, Eye, EyeOff,
+} from 'lucide-react';
+import type { FilterId, ScannedPage, CropRegion, EnhancementSettings } from '@/types';
+import { defaultEnhancementSettings } from '@/types';
 import { applyFilter } from '@/lib/image-processing/filters';
 import { rotateImage, perspectiveCrop } from '@/lib/image-processing/crop';
 import Button from '@/components/ui/Button';
 import FilterSelector from './FilterSelector';
 import CropEditor from './CropEditor';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import { cn } from '@/lib/utils/cn';
 
 interface ImageEditorProps {
   page: ScannedPage;
@@ -17,34 +22,58 @@ interface ImageEditorProps {
   onBack: () => void;
 }
 
-type EditorView = 'main' | 'crop';
+type EditorView = 'main' | 'crop' | 'sliders';
+
+const SLIDER_DEFS: Array<{
+  key: keyof EnhancementSettings;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+}> = [
+  { key: 'brightness',      label: 'Kecerahan',     min: -100, max: 100, step: 1 },
+  { key: 'contrast',        label: 'Kontras',        min: -100, max: 100, step: 1 },
+  { key: 'saturation',      label: 'Saturasi',       min: -100, max: 100, step: 1 },
+  { key: 'sharpness',       label: 'Ketajaman',      min: 0,    max: 100, step: 1 },
+  { key: 'denoise',         label: 'Noise Reduction',min: 0,    max: 100, step: 1 },
+  { key: 'shadowReduction', label: 'Kurangi Bayangan',min:0,    max: 100, step: 1 },
+];
 
 export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBack }: ImageEditorProps) {
-  const [current, setCurrent] = useState<ScannedPage>(() => ({ ...page }));
-  const [view, setView]       = useState<EditorView>('main');
-  const [processing, setProcessing] = useState(false);
+  const [current, setCurrent]         = useState<ScannedPage>(() => ({ ...page }));
+  const [view, setView]               = useState<EditorView>('main');
+  const [processing, setProcessing]   = useState(false);
   const [showFilterBar, setShowFilterBar] = useState(true);
+  const [showBefore, setShowBefore]   = useState(false);
+  const applyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /**
-   * Rotation: always rotate the ORIGINAL image (original + current rotation angle),
-   * then re-apply the current filter to the rotated result.
-   * This prevents JPEG quality degradation from repeated re-encoding.
-   */
+  // Debounced processing for sliders
+  const scheduleApply = useCallback((updated: ScannedPage) => {
+    if (applyTimer.current) clearTimeout(applyTimer.current);
+    applyTimer.current = setTimeout(async () => {
+      setProcessing(true);
+      try {
+        const rotatedOriginal = updated.rotation === 0
+          ? updated.originalDataUrl
+          : await rotateImage(updated.originalDataUrl, updated.rotation);
+        const processed = await applyFilter(rotatedOriginal, updated.filter, updated.enhancementSettings);
+        setCurrent(prev => ({ ...prev, processedDataUrl: processed }));
+      } finally {
+        setProcessing(false);
+      }
+    }, 300);
+  }, []);
+
   const applyRotation = useCallback(async (direction: 'left' | 'right') => {
     setProcessing(true);
     try {
       const addDeg   = direction === 'right' ? 90 : 270;
-      const newAngle = ((current.rotation + addDeg) % 360) as number;
-
-      // Rotate original image by the cumulative angle in one pass
+      const newAngle = ((current.rotation + addDeg) % 360) as 0 | 90 | 180 | 270;
       const rotated  = newAngle === 0
         ? current.originalDataUrl
         : await rotateImage(current.originalDataUrl, newAngle);
-
-      // Re-apply the current filter on the freshly rotated image
-      const filtered = await applyFilter(rotated, current.filter);
-
-      setCurrent((prev) => ({
+      const filtered = await applyFilter(rotated, current.filter, current.enhancementSettings);
+      setCurrent(prev => ({
         ...prev,
         processedDataUrl: filtered,
         rotation: newAngle,
@@ -54,60 +83,70 @@ export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBac
     }
   }, [current]);
 
-  /**
-   * Filter change: always apply the new filter to the CURRENT rotated original,
-   * never to the already-filtered processed image.
-   * We store the "rotated original" implicitly: re-rotate originalDataUrl by current.rotation.
-   */
-  const handleFilterChange = useCallback(async (filter: FilterMode) => {
+  const handleFilterChange = useCallback(async (filter: FilterId) => {
     if (filter === current.filter) return;
     setProcessing(true);
     try {
-      // Get the rotation-adjusted base (original rotated to current angle)
       const rotatedOriginal = current.rotation === 0
         ? current.originalDataUrl
         : await rotateImage(current.originalDataUrl, current.rotation);
-
-      const newDataUrl = await applyFilter(rotatedOriginal, filter);
-      setCurrent((prev) => ({ ...prev, filter, processedDataUrl: newDataUrl }));
+      const newDataUrl = await applyFilter(rotatedOriginal, filter, current.enhancementSettings);
+      setCurrent(prev => ({ ...prev, filter, processedDataUrl: newDataUrl }));
     } finally {
       setProcessing(false);
     }
   }, [current]);
 
-  /**
-   * Crop: applies perspective correction from originalDataUrl, then re-applies filter.
-   */
+  const handleSliderChange = useCallback((
+    key: keyof EnhancementSettings,
+    value: number,
+  ) => {
+    const updated = {
+      ...current,
+      enhancementSettings: { ...current.enhancementSettings, [key]: value },
+    };
+    setCurrent(updated);
+    scheduleApply(updated);
+  }, [current, scheduleApply]);
+
+  const handleResetEnhancement = useCallback(async () => {
+    const defaults = defaultEnhancementSettings();
+    setProcessing(true);
+    try {
+      const rotatedOriginal = current.rotation === 0
+        ? current.originalDataUrl
+        : await rotateImage(current.originalDataUrl, current.rotation);
+      const processed = await applyFilter(rotatedOriginal, current.filter, defaults);
+      setCurrent(prev => ({
+        ...prev,
+        enhancementSettings: defaults,
+        processedDataUrl: processed,
+      }));
+    } finally {
+      setProcessing(false);
+    }
+  }, [current]);
+
   async function handleCropConfirm(cropRegion: CropRegion) {
     setProcessing(true);
     setView('main');
     try {
-      const tl = cropRegion.topLeft;
-      const tr = cropRegion.topRight;
-      const br = cropRegion.bottomRight;
-      const bl = cropRegion.bottomLeft;
-
+      const tl = cropRegion.topLeft, tr = cropRegion.topRight;
+      const br = cropRegion.bottomRight, bl = cropRegion.bottomLeft;
       const w = Math.max(100, Math.round(Math.max(
-        Math.hypot(tr.x - tl.x, tr.y - tl.y),
-        Math.hypot(br.x - bl.x, br.y - bl.y),
+        Math.hypot(tr.x-tl.x, tr.y-tl.y), Math.hypot(br.x-bl.x, br.y-bl.y),
       )));
       const h = Math.max(100, Math.round(Math.max(
-        Math.hypot(bl.x - tl.x, bl.y - tl.y),
-        Math.hypot(br.x - tr.x, br.y - tr.y),
+        Math.hypot(bl.x-tl.x, bl.y-tl.y), Math.hypot(br.x-tr.x, br.y-tr.y),
       )));
-
-      // Crop from original image
-      const cropped  = await perspectiveCrop(current.originalDataUrl, cropRegion, w, h);
-      // Apply current filter to the cropped result
-      const filtered = await applyFilter(cropped, current.filter);
-
-      setCurrent((prev) => ({
+      const cropped  = await perspectiveCrop(current.originalDataUrl, cropRegion, w, h, 'preview');
+      const filtered = await applyFilter(cropped, current.filter, current.enhancementSettings);
+      setCurrent(prev => ({
         ...prev,
-        // The new "original" after crop is the cropped (but unfiltered) image
         originalDataUrl: cropped,
         processedDataUrl: filtered,
         cropRegion,
-        rotation: 0,  // reset rotation since we cropped from the unrotated original
+        rotation: 0,
         width: w,
         height: h,
       }));
@@ -127,6 +166,13 @@ export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBac
     );
   }
 
+  const hasNonDefaultSettings = Object.entries(current.enhancementSettings).some(
+    ([key, val]) => {
+      const defaults = defaultEnhancementSettings();
+      return defaults[key as keyof EnhancementSettings] !== val;
+    }
+  );
+
   return (
     <div className="fixed inset-0 bg-gray-950 z-50 flex flex-col">
       {/* Header */}
@@ -143,64 +189,84 @@ export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBac
       </div>
 
       {/* Image preview */}
-      <div className="flex-1 flex items-center justify-center overflow-hidden px-3 py-2 relative" style={{ minHeight: 0 }}>
+      <div
+        className="flex-1 flex items-center justify-center overflow-hidden px-3 py-2 relative"
+        style={{ minHeight: 0 }}
+      >
         {processing && (
           <div className="absolute inset-0 bg-black/70 z-10 flex flex-col items-center justify-center gap-3">
             <LoadingSpinner size="lg" />
             <p className="text-white text-sm font-medium">Memproses...</p>
           </div>
         )}
+
+        {/* Before / After toggle */}
+        <div className="absolute top-3 right-3 z-20">
+          <button
+            onPointerDown={() => setShowBefore(true)}
+            onPointerUp={() => setShowBefore(false)}
+            onPointerLeave={() => setShowBefore(false)}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all',
+              showBefore ? 'bg-orange-500 text-white' : 'bg-white/15 text-white/80 hover:bg-white/25',
+            )}
+          >
+            {showBefore ? <EyeOff size={12} /> : <Eye size={12} />}
+            {showBefore ? 'Asli' : 'Sebelum/Sesudah'}
+          </button>
+        </div>
+
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={current.processedDataUrl}
+          src={showBefore ? current.originalDataUrl : current.processedDataUrl}
           alt={`Halaman ${pageIndex + 1}`}
-          className="max-w-full max-h-full object-contain rounded-lg shadow-xl"
+          className="max-w-full max-h-full object-contain rounded-lg shadow-xl transition-opacity"
           style={{ boxShadow: '0 0 40px rgba(0,0,0,0.5)' }}
         />
       </div>
 
       {/* Bottom controls */}
       <div className="flex-shrink-0 bg-gray-950 pb-safe safe-area-pb">
-        {/* Action bar */}
-        <div className="flex items-center justify-around px-4 py-3 border-t border-white/10">
-          <button
-            onClick={() => applyRotation('left')}
-            disabled={processing}
-            className="flex flex-col items-center gap-1 text-white/70 hover:text-white disabled:opacity-40 min-w-[60px]"
-          >
-            <RotateCcw size={22} />
-            <span className="text-[10px]">Kiri</span>
-          </button>
-          <button
-            onClick={() => setView('crop')}
-            disabled={processing}
-            className="flex flex-col items-center gap-1 text-white/70 hover:text-white disabled:opacity-40 min-w-[60px]"
-          >
-            <Crop size={22} />
-            <span className="text-[10px]">Potong</span>
-          </button>
-          <button
-            onClick={() => setShowFilterBar(v => !v)}
-            className={`flex flex-col items-center gap-1 min-w-[60px] transition-colors ${
-              showFilterBar ? 'text-teal-400' : 'text-white/70 hover:text-white'
-            }`}
-          >
-            <div className="w-[22px] h-[22px] rounded-full bg-gradient-to-br from-teal-400 via-blue-400 to-purple-400" />
-            <span className="text-[10px]">Filter</span>
-          </button>
-          <button
-            onClick={() => applyRotation('right')}
-            disabled={processing}
-            className="flex flex-col items-center gap-1 text-white/70 hover:text-white disabled:opacity-40 min-w-[60px]"
-          >
-            <RotateCw size={22} />
-            <span className="text-[10px]">Kanan</span>
-          </button>
-        </div>
+
+        {/* Sliders panel */}
+        {view === 'sliders' && (
+          <div className="border-t border-white/10 px-4 pt-3 pb-2 max-h-64 overflow-y-auto">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-white/80 text-sm font-medium">Penyesuaian</span>
+              <button
+                onClick={handleResetEnhancement}
+                className="text-teal-400 text-xs hover:text-teal-300 disabled:opacity-40"
+                disabled={!hasNonDefaultSettings || processing}
+              >
+                Reset
+              </button>
+            </div>
+            {SLIDER_DEFS.map(({ key, label, min, max, step }) => {
+              const val = current.enhancementSettings[key] as number;
+              return (
+                <div key={key} className="mb-3">
+                  <div className="flex justify-between mb-1">
+                    <span className="text-white/60 text-xs">{label}</span>
+                    <span className="text-white/60 text-xs font-mono">{val > 0 ? '+' : ''}{val}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={min}
+                    max={max}
+                    step={step}
+                    value={val}
+                    onChange={e => handleSliderChange(key, Number(e.target.value))}
+                    className="w-full h-1.5 accent-teal-400 cursor-pointer"
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Filter strip */}
-        {showFilterBar && (
-          <div className="border-t border-white/10 pt-2 pb-3">
+        {showFilterBar && view !== 'sliders' && (
+          <div className="border-t border-white/10 pt-2 pb-1">
             <FilterSelector
               imageDataUrl={current.originalDataUrl}
               currentFilter={current.filter}
@@ -208,7 +274,71 @@ export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBac
             />
           </div>
         )}
+
+        {/* Action bar */}
+        <div className="flex items-center justify-around px-4 py-2.5 border-t border-white/10">
+          <ToolButton
+            icon={<RotateCcw size={20} />}
+            label="Kiri"
+            onClick={() => applyRotation('left')}
+            disabled={processing}
+          />
+          <ToolButton
+            icon={<RotateCw size={20} />}
+            label="Kanan"
+            onClick={() => applyRotation('right')}
+            disabled={processing}
+          />
+          <ToolButton
+            icon={<Crop size={20} />}
+            label="Potong"
+            onClick={() => setView('crop')}
+            disabled={processing}
+          />
+          <ToolButton
+            icon={<Layers size={20} />}
+            label="Filter"
+            onClick={() => { setView('main'); setShowFilterBar(v => !v); }}
+            active={showFilterBar && view !== 'sliders'}
+          />
+          <ToolButton
+            icon={<SlidersHorizontal size={20} />}
+            label="Adjust"
+            onClick={() => setView(view === 'sliders' ? 'main' : 'sliders')}
+            active={view === 'sliders'}
+            badge={hasNonDefaultSettings}
+          />
+        </div>
       </div>
     </div>
+  );
+}
+
+function ToolButton({
+  icon, label, onClick, disabled, active, badge,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+  badge?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'flex flex-col items-center gap-1 min-w-[52px] relative transition-colors',
+        active ? 'text-teal-400' : 'text-white/70 hover:text-white',
+        disabled && 'opacity-40',
+      )}
+    >
+      {icon}
+      <span className="text-[9px] leading-none">{label}</span>
+      {badge && (
+        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-teal-400 rounded-full" />
+      )}
+    </button>
   );
 }

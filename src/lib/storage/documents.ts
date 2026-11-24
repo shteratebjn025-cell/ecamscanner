@@ -1,15 +1,21 @@
 /**
- * Document storage layer.
- * - Selalu simpan ke IndexedDB (offline-first).
- * - Jika Supabase dikonfigurasi, sync ke cloud juga.
+ * Document storage orchestrator — v2.0
+ *
+ * Default: IndexedDB (offline-first, local).
+ * Optional: Supabase sync only when env is configured AND user has not opted out.
+ *
+ * PRD requirement: images must NEVER be uploaded without explicit user action.
+ * Cloud sync is opt-in and only triggers on explicit "Save to Cloud" action.
  */
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { v4 as uuidv4 } from 'uuid';
 import type { DocumentRecord, ScannedPage } from '@/types';
+import { normalizeFilterId, defaultEnhancementSettings } from '@/types';
 import * as localDb from './db';
 import { uploadPageImage, uploadThumbnail, getPublicUrl } from './storage-upload';
 
-function isSupabaseConfigured(): boolean {
+export function isSupabaseConfigured(): boolean {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
   return url.length > 0 && !url.includes('your-project-id');
 }
@@ -24,26 +30,35 @@ function getSession(): string {
   return session;
 }
 
-export async function saveDocumentEverywhere(doc: DocumentRecord): Promise<void> {
-  // 1. Selalu simpan lokal dulu
-  await localDb.saveDocument(doc);
+// ─── Save ─────────────────────────────────────────────────────────────────────
 
-  // 2. Sync ke cloud jika Supabase dikonfigurasi
-  if (isSupabaseConfigured()) {
-    try {
-      await syncToSupabase(doc);
-    } catch (err) {
-      console.warn('[Supabase] Sync gagal, dokumen tetap tersimpan lokal:', err);
-    }
-  }
+/**
+ * Save to IndexedDB (always).
+ * Cloud sync only happens if explicitly requested via saveDocumentToCloud().
+ */
+export async function saveDocumentEverywhere(doc: DocumentRecord): Promise<void> {
+  await localDb.saveDocument(doc);
 }
 
+/**
+ * Explicitly sync a saved document to Supabase.
+ * Call only when user explicitly chooses "Save to Cloud" or is logged in and opts in.
+ */
+export async function saveDocumentToCloud(doc: DocumentRecord): Promise<void> {
+  if (!isSupabaseConfigured()) {
+    throw new Error('Supabase belum dikonfigurasi.');
+  }
+  await syncToSupabase(doc);
+}
+
+// ─── Load ─────────────────────────────────────────────────────────────────────
+
 export async function getAllDocumentsEverywhere(): Promise<DocumentRecord[]> {
-  // Utamakan lokal (cepat + offline-first)
+  // Always read local first (fast + works offline)
   const local = await localDb.getAllDocuments();
   if (local.length > 0) return local;
 
-  // Fallback ke Supabase jika lokal kosong
+  // Fallback: fetch from Supabase only if local is empty
   if (isSupabaseConfigured()) {
     try {
       return await fetchFromSupabase();
@@ -54,25 +69,31 @@ export async function getAllDocumentsEverywhere(): Promise<DocumentRecord[]> {
   return [];
 }
 
-export { deleteDocument, getDocument, getStorageEstimate } from './db';
+// ─── Re-export local operations ───────────────────────────────────────────────
 
-// ─── Supabase sync ───────────────────────────────────────────────────────────
+export {
+  deleteDocument,
+  getDocument,
+  getStorageEstimate,
+  renameDocument,
+  updateDocumentOcr,
+} from './db';
+
+// ─── Supabase sync ────────────────────────────────────────────────────────────
 
 async function syncToSupabase(doc: DocumentRecord): Promise<void> {
   const { getSupabaseClient } = await import('@/lib/supabase/client');
   const sb      = getSupabaseClient() as any;
   const session = getSession();
 
-  // Upload thumbnail ke Storage
   let thumbnailUrl: string | null = null;
   if (doc.thumbnail?.startsWith('data:')) {
     try {
       const p = await uploadThumbnail(doc.id, doc.thumbnail);
       thumbnailUrl = getPublicUrl('documents', p);
-    } catch { /* lanjut tanpa thumbnail */ }
+    } catch { /* continue without thumbnail */ }
   }
 
-  // Upsert dokumen
   const { error: docErr } = await sb.from('documents').upsert({
     id:            doc.id,
     user_session:  session,
@@ -83,7 +104,6 @@ async function syncToSupabase(doc: DocumentRecord): Promise<void> {
   });
   if (docErr) throw docErr;
 
-  // Upload + upsert setiap halaman
   for (let i = 0; i < doc.pages.length; i++) {
     const page = doc.pages[i];
     let imageUrl = page.processedDataUrl;
@@ -92,7 +112,7 @@ async function syncToSupabase(doc: DocumentRecord): Promise<void> {
       try {
         const p = await uploadPageImage(doc.id, page.id, page.processedDataUrl);
         imageUrl = getPublicUrl('documents', p);
-      } catch { /* simpan sebagai data URL jika upload gagal */ }
+      } catch { /* use data URL as fallback */ }
     }
 
     await sb.from('document_pages').upsert({
@@ -104,6 +124,8 @@ async function syncToSupabase(doc: DocumentRecord): Promise<void> {
       rotation:    page.rotation,
       width:       page.width,
       height:      page.height,
+      ocr_status:  page.ocrStatus ?? 'not-started',
+      ocr_text:    page.ocrText   ?? '',
     });
   }
 }
@@ -122,7 +144,7 @@ async function fetchFromSupabase(): Promise<DocumentRecord[]> {
   if (error) throw error;
   if (!data) return [];
 
-  return (data as any[]).map((d: any) => ({
+  return (data as any[]).map((d: any): DocumentRecord => ({
     id:        d.id,
     name:      d.name,
     createdAt: new Date(d.created_at).getTime(),
@@ -136,10 +158,13 @@ async function fetchFromSupabase(): Promise<DocumentRecord[]> {
         originalDataUrl:  p.image_url,
         processedDataUrl: p.image_url,
         cropRegion:       null,
-        filter:           p.filter as ScannedPage['filter'],
-        rotation:         p.rotation,
-        width:            p.width,
-        height:           p.height,
+        filter:           normalizeFilterId(p.filter ?? 'auto'),
+        enhancementSettings: defaultEnhancementSettings(),
+        rotation:         (p.rotation ?? 0) as 0 | 90 | 180 | 270,
+        width:            p.width  ?? 0,
+        height:           p.height ?? 0,
+        ocrStatus:        p.ocr_status ?? 'not-started',
+        ocrText:          p.ocr_text   ?? '',
       })),
   }));
 }

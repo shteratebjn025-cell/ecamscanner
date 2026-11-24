@@ -34,9 +34,11 @@ export default function CropEditor({ imageDataUrl, initialCrop, onConfirm, onBac
   const cropRef        = useRef<CropRegion | null>(null);
   const displaySizeRef = useRef({ w: 0, h: 0 });
   const activeRef      = useRef<CornerKey | null>(null);
-  cropRef.current        = crop;
-  displaySizeRef.current = displaySize;
-  activeRef.current      = activeCorner;
+
+  // Sync refs in effects to avoid "ref during render" lint error
+  useEffect(() => { cropRef.current = crop; });
+  useEffect(() => { displaySizeRef.current = displaySize; });
+  useEffect(() => { activeRef.current = activeCorner; });
 
   // Convert original image px → canvas CSS px
   const toCanvas = useCallback((pt: { x: number; y: number }) => {
@@ -161,6 +163,7 @@ export default function CropEditor({ imageDataUrl, initialCrop, onConfirm, onBac
   useEffect(() => { draw(); }, [draw, crop, displaySize, activeCorner]);
 
   // ─── Load image ──────────────────────────────────────────────────────────
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setLoaded(false);
     setCrop(null);
@@ -196,6 +199,7 @@ export default function CropEditor({ imageDataUrl, initialCrop, onConfirm, onBac
     img.onerror = () => setLoaded(true);
     img.src = imageDataUrl;
   }, [imageDataUrl, initialCrop]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ─── Pointer/Touch coordinate helper ────────────────────────────────────
   function getCanvasXY(clientX: number, clientY: number): { x: number; y: number } {

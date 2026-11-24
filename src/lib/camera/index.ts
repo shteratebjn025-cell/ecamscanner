@@ -193,14 +193,14 @@ async function getStream(facingMode: FacingMode): Promise<MediaStream> {
       },
       audio: false,
     });
-  } catch (e1) {
+  } catch {
     // OverconstrainedError atau perangkat tidak support resolution — coba tanpa resolution
     try {
       return await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: facingMode } },
         audio: false,
       });
-    } catch (e2) {
+    } catch {
       // Fallback: any camera
       try {
         return await navigator.mediaDevices.getUserMedia({

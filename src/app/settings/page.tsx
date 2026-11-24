@@ -1,17 +1,18 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { ChevronLeft, Database, Info, Trash2, ChevronRight } from 'lucide-react';
+import { ChevronLeft, Database, Info, Trash2, ChevronRight, Cloud, CloudOff } from 'lucide-react';
 import Link from 'next/link';
 import AppShell from '@/components/layout/AppShell';
 import Button from '@/components/ui/Button';
-import { getAllDocumentsEverywhere, deleteDocument, getStorageEstimate } from '@/lib/storage/documents';
+import { getAllDocumentsEverywhere, deleteDocument, getStorageEstimate, isSupabaseConfigured } from '@/lib/storage/documents';
 import { APP_NAME, APP_VERSION } from '@/constants';
 
 export default function SettingsPage() {
-  const [docCount, setDocCount] = useState(0);
-  const [storage, setStorage] = useState<{ used: number; quota: number } | null>(null);
-  const [clearing, setClearing] = useState(false);
-  const [cleared, setCleared] = useState(false);
+  const [docCount, setDocCount]   = useState(0);
+  const [storage, setStorage]     = useState<{ used: number; quota: number } | null>(null);
+  const [clearing, setClearing]   = useState(false);
+  const [cleared, setCleared]     = useState(false);
+  const supabaseOn = isSupabaseConfigured();
 
   useEffect(() => {
     async function load() {
@@ -28,9 +29,7 @@ export default function SettingsPage() {
     setClearing(true);
     try {
       const docs = await getAllDocumentsEverywhere();
-      for (const d of docs) {
-        await deleteDocument(d.id);
-      }
+      for (const d of docs) await deleteDocument(d.id);
       setDocCount(0);
       setCleared(true);
     } finally {
@@ -56,6 +55,7 @@ export default function SettingsPage() {
       </header>
 
       <div className="p-4 space-y-4">
+
         {/* Storage section */}
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100">
@@ -64,7 +64,6 @@ export default function SettingsPage() {
               <h2 className="font-semibold text-gray-900 text-sm">Penyimpanan Lokal</h2>
             </div>
           </div>
-
           <div className="divide-y divide-gray-100">
             <div className="flex items-center justify-between px-4 py-3">
               <span className="text-sm text-gray-700">Dokumen tersimpan</span>
@@ -74,15 +73,11 @@ export default function SettingsPage() {
               <>
                 <div className="flex items-center justify-between px-4 py-3">
                   <span className="text-sm text-gray-700">Penyimpanan digunakan</span>
-                  <span className="text-sm font-semibold text-gray-900">
-                    {formatBytes(storage.used)}
-                  </span>
+                  <span className="text-sm font-semibold text-gray-900">{formatBytes(storage.used)}</span>
                 </div>
                 <div className="flex items-center justify-between px-4 py-3">
                   <span className="text-sm text-gray-700">Total kapasitas</span>
-                  <span className="text-sm font-semibold text-gray-900">
-                    {formatBytes(storage.quota)}
-                  </span>
+                  <span className="text-sm font-semibold text-gray-900">{formatBytes(storage.quota)}</span>
                 </div>
                 <div className="px-4 py-3">
                   <div className="flex justify-between text-xs text-gray-500 mb-1">
@@ -106,6 +101,39 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* Cloud status */}
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100">
+            <div className="flex items-center gap-2">
+              {supabaseOn ? <Cloud size={16} className="text-blue-500" /> : <CloudOff size={16} className="text-gray-400" />}
+              <h2 className="font-semibold text-gray-900 text-sm">Sinkronisasi Cloud</h2>
+            </div>
+          </div>
+          <div className="px-4 py-3">
+            {supabaseOn ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 bg-green-400 rounded-full" />
+                  <span className="text-sm text-gray-700">Supabase terhubung</span>
+                </div>
+                <p className="text-xs text-gray-500 leading-relaxed">
+                  Upload ke cloud hanya dilakukan saat Anda menekan &quot;Simpan ke Cloud&quot; secara eksplisit. Dokumen tidak dikirim otomatis.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 bg-gray-300 rounded-full" />
+                  <span className="text-sm text-gray-500">Belum dikonfigurasi</span>
+                </div>
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  Semua dokumen disimpan lokal di browser. Set NEXT_PUBLIC_SUPABASE_URL untuk mengaktifkan cloud backup.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Document actions */}
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100">
@@ -124,8 +152,7 @@ export default function SettingsPage() {
                 <p className="text-sm text-green-600 font-medium">✓ Semua dokumen telah dihapus</p>
               ) : (
                 <Button
-                  variant="danger"
-                  size="sm"
+                  variant="danger" size="sm"
                   onClick={handleClearAll}
                   loading={clearing}
                   disabled={docCount === 0}
@@ -158,20 +185,21 @@ export default function SettingsPage() {
             </div>
             <div className="flex items-center justify-between px-4 py-3">
               <span className="text-sm text-gray-700">Platform</span>
-              <span className="text-sm font-semibold text-gray-900">Web Browser</span>
+              <span className="text-sm font-semibold text-gray-900">Web Browser (PWA)</span>
             </div>
-            <div className="px-4 py-3">
+            <div className="px-4 py-3 space-y-2">
               <p className="text-xs text-gray-500 leading-relaxed">
-                Dokumen Anda diproses dan disimpan sepenuhnya di browser lokal. Tidak ada dokumen yang dikirim ke server. Menghapus data browser akan menghapus semua dokumen tersimpan.
+                Semua pemrosesan gambar (deteksi, crop, filter, enhancement, OCR) berjalan di browser. Tidak ada gambar yang dikirim ke server tanpa tindakan eksplisit Anda.
+              </p>
+              <p className="text-xs text-gray-400 leading-relaxed">
+                Menghapus data browser atau IndexedDB akan menghapus semua dokumen lokal. Gunakan cloud backup untuk dokumen penting.
               </p>
             </div>
           </div>
         </div>
 
         <div className="text-center py-4">
-          <p className="text-xs text-gray-400">
-            Free · No Watermark · No Registration Required
-          </p>
+          <p className="text-xs text-gray-400">Free · No Watermark · No Registration Required</p>
         </div>
       </div>
     </AppShell>

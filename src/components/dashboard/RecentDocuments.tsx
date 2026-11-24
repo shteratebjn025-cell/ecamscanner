@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { FileText, Trash2, Download, ChevronRight } from 'lucide-react';
+import { FileText, Trash2, ChevronRight } from 'lucide-react';
 import { getAllDocumentsEverywhere, deleteDocument } from '@/lib/storage/documents';
 import type { DocumentRecord } from '@/types';
 import { formatDateTime } from '@/lib/utils/date';
@@ -24,6 +24,7 @@ export default function RecentDocuments({ onReopen }: RecentDocumentsProps) {
     }
   }
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
 
   async function handleDelete(id: string, e: React.MouseEvent) {
