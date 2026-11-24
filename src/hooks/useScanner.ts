@@ -3,7 +3,7 @@ import { useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { ScannedPage, CropRegion, FilterMode, AppStep } from '@/types';
 import { detectEdges, defaultCropRegion } from '@/lib/image-processing/edge-detection';
-import { perspectiveCrop, resizeImage } from '@/lib/image-processing/crop';
+import { perspectiveCrop } from '@/lib/image-processing/crop';
 import { applyFilter } from '@/lib/image-processing/filters';
 import { saveDocumentEverywhere } from '@/lib/storage/documents';
 import { generateDocumentName } from '@/lib/utils/date';
@@ -73,22 +73,20 @@ export function useScanner() {
   const handleImageAcquired = useCallback(async (dataUrl: string) => {
     setState((s) => ({ ...s, processing: true, currentImage: null, error: null }));
     try {
-      // Resize dulu agar tidak OOM di mobile (max 2000px)
-      const { dataUrl: resized } = await resizeImage(dataUrl, 2000);
-
       const img = new Image();
       await new Promise<void>((res, rej) => {
         img.onload = () => res();
         img.onerror = () => rej(new Error('Image load failed'));
-        img.src = resized;
+        img.src = dataUrl;
       });
 
-      const crop = await detectEdges(resized, img.naturalWidth, img.naturalHeight);
+      // Detect edges pada gambar asli (tidak di-resize agar akurat)
+      const crop = await detectEdges(dataUrl, img.naturalWidth, img.naturalHeight);
       const finalCrop = crop ?? defaultCropRegion(img.naturalWidth, img.naturalHeight);
 
       setState((s) => ({
         ...s,
-        currentImage: resized,
+        currentImage: dataUrl,
         currentCrop: finalCrop,
         processing: false,
         step: 'crop',
