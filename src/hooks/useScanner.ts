@@ -70,7 +70,8 @@ export function useScanner() {
   }, []);
 
   // Called when user captures/selects an image
-  const handleImageAcquired = useCallback(async (dataUrl: string) => {
+  // detectedCrop: crop yang sudah dideteksi real-time (dari kamera) — skip edge detection ulang
+  const handleImageAcquired = useCallback(async (dataUrl: string, detectedCrop?: CropRegion | null) => {
     setState((s) => ({ ...s, processing: true, currentImage: null, error: null }));
     try {
       const img = new Image();
@@ -80,9 +81,16 @@ export function useScanner() {
         img.src = dataUrl;
       });
 
-      // Detect edges pada gambar asli (tidak di-resize agar akurat)
-      const crop = await detectEdges(dataUrl, img.naturalWidth, img.naturalHeight);
-      const finalCrop = crop ?? defaultCropRegion(img.naturalWidth, img.naturalHeight);
+      let finalCrop: CropRegion;
+
+      if (detectedCrop) {
+        // Gunakan crop dari real-time detection (lebih akurat, tidak perlu proses lagi)
+        finalCrop = detectedCrop;
+      } else {
+        // Fallback: jalankan edge detection pada gambar statis
+        const crop = await detectEdges(dataUrl, img.naturalWidth, img.naturalHeight);
+        finalCrop = crop ?? defaultCropRegion(img.naturalWidth, img.naturalHeight);
+      }
 
       setState((s) => ({
         ...s,

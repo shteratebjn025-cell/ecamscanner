@@ -129,7 +129,7 @@ export default function ScannerApp() {
         {fileInputEl}
         {globalOverlays}
         <CameraView
-          onCapture={handleImageAcquired}
+          onCapture={(dataUrl, detectedCrop) => handleImageAcquired(dataUrl, detectedCrop)}
           onClose={() => setStep(state.pages.length > 0 ? 'pages' : 'dashboard')}
           onGalleryFallback={() => {
             setStep('dashboard');

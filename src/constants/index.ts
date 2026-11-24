@@ -8,13 +8,13 @@ export const MAX_FILE_SIZE_MB = 20;
 export const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
 export const FILTER_LABELS: Record<FilterMode, string> = {
-  original: 'Original',
-  auto: 'Auto',
-  document: 'Document',
-  blackwhite: 'B&W',
-  grayscale: 'Grayscale',
-  color: 'Color',
-  magiccolor: 'Magic',
+  original:   'Asli',
+  auto:       'OmnisFix',
+  document:   'Tanpa Bayang',
+  blackwhite: 'Hitam Putih',
+  grayscale:  'Abu-abu',
+  color:      'Warna',
+  magiccolor: 'Magic Color',
 };
 
 export const PAGE_SIZE_LABELS: Record<PageSize, string> = {

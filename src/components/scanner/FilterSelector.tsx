@@ -2,17 +2,22 @@
 import { useEffect, useState } from 'react';
 import { Check } from 'lucide-react';
 import type { FilterMode } from '@/types';
-import { FILTER_LABELS } from '@/constants';
 import { applyFilter } from '@/lib/image-processing/filters';
 import { cn } from '@/lib/utils/cn';
 
-const FILTERS: FilterMode[] = ['original', 'auto', 'document', 'blackwhite', 'grayscale', 'color', 'magiccolor'];
+const FILTERS: { mode: FilterMode; label: string; desc: string }[] = [
+  { mode: 'original', label: 'Asli',          desc: 'Tanpa perubahan' },
+  { mode: 'auto',     label: 'OmnisFix',       desc: 'Professional' },
+  { mode: 'document', label: 'Tanpa Bayang',   desc: 'Teks tajam' },
+  { mode: 'blackwhite', label: 'Hitam Putih',  desc: 'Klasik' },
+  { mode: 'grayscale',  label: 'Abu-abu',      desc: 'Halftone' },
+  { mode: 'color',      label: 'Warna',        desc: 'Full color' },
+  { mode: 'magiccolor', label: 'Magic Color',  desc: 'Vivid' },
+];
 
 interface FilterSelectorProps {
-  /** Base image to generate previews from (should be the unfiltered original) */
   imageDataUrl: string;
   currentFilter: FilterMode;
-  /** Called with just the selected filter name — parent is responsible for applying it */
   onChange: (filter: FilterMode) => void;
 }
 
@@ -21,74 +26,82 @@ export default function FilterSelector({ imageDataUrl, currentFilter, onChange }
 
   useEffect(() => {
     let cancelled = false;
+    setPreviews({});
 
     const generate = async () => {
-      // Buat preview kecil dulu (200px) agar cepat
-      const makeThumb = (src: string): Promise<string> => new Promise((res) => {
-        const i = new Image();
-        i.onload = () => {
-          const s = Math.min(1, 200 / Math.max(i.naturalWidth, i.naturalHeight));
-          const c = document.createElement('canvas');
-          c.width  = Math.round(i.naturalWidth  * s);
-          c.height = Math.round(i.naturalHeight * s);
-          c.getContext('2d')!.drawImage(i, 0, 0, c.width, c.height);
-          res(c.toDataURL('image/jpeg', 0.7));
-        };
-        i.onerror = () => res(src);
-        i.src = src;
-      });
+      // Buat thumbnail 160px untuk preview
+      const thumb = await makeThumb(imageDataUrl, 160);
 
-      const thumb = await makeThumb(imageDataUrl);
-
-      for (const f of FILTERS) {
+      for (const { mode } of FILTERS) {
         if (cancelled) return;
         try {
-          const preview = await applyFilter(thumb, f);
-          if (!cancelled) setPreviews((p) => ({ ...p, [f]: preview }));
+          const preview = await applyFilter(thumb, mode);
+          if (!cancelled) setPreviews(p => ({ ...p, [mode]: preview }));
         } catch {
-          if (!cancelled) setPreviews((p) => ({ ...p, [f]: thumb }));
+          if (!cancelled) setPreviews(p => ({ ...p, [mode]: thumb }));
         }
       }
     };
-
     generate();
     return () => { cancelled = true; };
   }, [imageDataUrl]);
 
   return (
-    <div className="flex gap-3 overflow-x-auto pb-1 px-1 scrollbar-hide">
-      {FILTERS.map((f) => (
-        <button
-          key={f}
-          onClick={() => onChange(f)}
-          className={cn(
-            'flex flex-col items-center gap-1.5 flex-shrink-0 transition-opacity',
-            currentFilter === f ? 'opacity-100' : 'opacity-70 hover:opacity-90',
-          )}
-        >
-          <div
-            className={cn(
-              'w-16 h-20 rounded-xl overflow-hidden relative border-2 transition-colors',
-              currentFilter === f ? 'border-blue-500' : 'border-transparent',
-            )}
+    <div className="flex gap-2 overflow-x-auto px-3 pb-1 scrollbar-hide">
+      {FILTERS.map(({ mode, label, desc }) => {
+        const active = mode === currentFilter;
+        return (
+          <button
+            key={mode}
+            onClick={() => onChange(mode)}
+            className="flex flex-col items-center gap-1.5 flex-shrink-0"
           >
-            {previews[f] ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={previews[f]} alt={FILTER_LABELS[f]} className="w-full h-full object-cover" />
-            ) : (
-              <div className="w-full h-full bg-gray-700 animate-pulse" />
-            )}
-            {currentFilter === f && (
-              <div className="absolute top-1 right-1 bg-blue-500 rounded-full p-0.5">
-                <Check size={10} className="text-white" />
+            {/* Thumbnail */}
+            <div className={cn(
+              'w-[70px] h-[85px] rounded-xl overflow-hidden relative border-2 transition-all',
+              active ? 'border-teal-400 scale-105' : 'border-transparent opacity-80',
+            )}>
+              {previews[mode] ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={previews[mode]} alt={label} className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full bg-gray-700 animate-pulse" />
+              )}
+              {active && (
+                <div className="absolute top-1 right-1 bg-teal-500 rounded-full p-0.5">
+                  <Check size={9} className="text-white" />
+                </div>
+              )}
+              {/* Label overlay di bawah thumbnail */}
+              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-1 pb-1 pt-3">
+                <p className={cn('text-[9px] font-semibold leading-none text-center', active ? 'text-teal-300' : 'text-white/90')}>
+                  {label}
+                </p>
               </div>
-            )}
-          </div>
-          <span className="text-xs font-medium text-gray-300 whitespace-nowrap">
-            {FILTER_LABELS[f]}
-          </span>
-        </button>
-      ))}
+            </div>
+            {/* Desc */}
+            <span className={cn('text-[9px] leading-none', active ? 'text-teal-400 font-medium' : 'text-white/50')}>
+              {desc}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
+}
+
+async function makeThumb(src: string, size: number): Promise<string> {
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, size / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width  = Math.round(img.naturalWidth  * s);
+      c.height = Math.round(img.naturalHeight * s);
+      c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = () => res(src);
+    img.src = src;
+  });
 }

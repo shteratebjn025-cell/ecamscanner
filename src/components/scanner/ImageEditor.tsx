@@ -20,10 +20,10 @@ interface ImageEditorProps {
 type EditorView = 'main' | 'crop';
 
 export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBack }: ImageEditorProps) {
-  // Deep-copy to avoid mutating parent state during editing
   const [current, setCurrent] = useState<ScannedPage>(() => ({ ...page }));
-  const [view, setView] = useState<EditorView>('main');
+  const [view, setView]       = useState<EditorView>('main');
   const [processing, setProcessing] = useState(false);
+  const [showFilterBar, setShowFilterBar] = useState(true);
 
   /**
    * Rotation: always rotate the ORIGINAL image (original + current rotation angle),
@@ -128,81 +128,86 @@ export default function ImageEditor({ page, pageIndex, totalPages, onSave, onBac
   }
 
   return (
-    <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
+    <div className="fixed inset-0 bg-gray-950 z-50 flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 safe-area-pt">
-        <Button variant="ghost" onClick={onBack} className="text-white hover:bg-white/10">
-          <ChevronLeft size={20} />
-          Kembali
+      <div className="flex items-center justify-between px-4 py-3 safe-area-pt flex-shrink-0">
+        <Button variant="ghost" onClick={onBack} className="text-white hover:bg-white/10 gap-1">
+          <ChevronLeft size={20} /> Kembali
         </Button>
-        <span className="text-white/70 text-sm">
+        <span className="text-white/70 text-sm font-medium">
           Hal. {pageIndex + 1} / {totalPages}
         </span>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => onSave(current)}
-          disabled={processing}
-        >
-          <Check size={16} />
-          Simpan
+        <Button variant="primary" size="sm" onClick={() => onSave(current)} disabled={processing}>
+          <Check size={16} /> Simpan
         </Button>
       </div>
 
       {/* Image preview */}
-      <div className="flex-1 flex items-center justify-center overflow-hidden px-4 py-2 relative">
+      <div className="flex-1 flex items-center justify-center overflow-hidden px-3 py-2 relative" style={{ minHeight: 0 }}>
         {processing && (
-          <div className="absolute inset-0 bg-black/60 z-10 flex items-center justify-center">
-            <LoadingSpinner size="lg" label="Memproses..." className="text-white" />
+          <div className="absolute inset-0 bg-black/70 z-10 flex flex-col items-center justify-center gap-3">
+            <LoadingSpinner size="lg" />
+            <p className="text-white text-sm font-medium">Memproses...</p>
           </div>
         )}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={current.processedDataUrl}
           alt={`Halaman ${pageIndex + 1}`}
-          className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+          className="max-w-full max-h-full object-contain rounded-lg shadow-xl"
+          style={{ boxShadow: '0 0 40px rgba(0,0,0,0.5)' }}
         />
       </div>
 
-      {/* Controls */}
-      <div className="bg-gray-900 px-4 py-3 space-y-4 safe-area-pb">
-        {/* Rotation & Crop row */}
-        <div className="flex items-center justify-center gap-4">
-          <Button
-            variant="ghost"
+      {/* Bottom controls */}
+      <div className="flex-shrink-0 bg-gray-950 pb-safe safe-area-pb">
+        {/* Action bar */}
+        <div className="flex items-center justify-around px-4 py-3 border-t border-white/10">
+          <button
             onClick={() => applyRotation('left')}
             disabled={processing}
-            className="text-white hover:bg-white/10 flex-col h-auto py-2 gap-1 text-xs"
+            className="flex flex-col items-center gap-1 text-white/70 hover:text-white disabled:opacity-40 min-w-[60px]"
           >
             <RotateCcw size={22} />
-            Putar Kiri
-          </Button>
-          <Button
-            variant="ghost"
+            <span className="text-[10px]">Kiri</span>
+          </button>
+          <button
             onClick={() => setView('crop')}
             disabled={processing}
-            className="text-white hover:bg-white/10 flex-col h-auto py-2 gap-1 text-xs"
+            className="flex flex-col items-center gap-1 text-white/70 hover:text-white disabled:opacity-40 min-w-[60px]"
           >
             <Crop size={22} />
-            Crop
-          </Button>
-          <Button
-            variant="ghost"
+            <span className="text-[10px]">Potong</span>
+          </button>
+          <button
+            onClick={() => setShowFilterBar(v => !v)}
+            className={`flex flex-col items-center gap-1 min-w-[60px] transition-colors ${
+              showFilterBar ? 'text-teal-400' : 'text-white/70 hover:text-white'
+            }`}
+          >
+            <div className="w-[22px] h-[22px] rounded-full bg-gradient-to-br from-teal-400 via-blue-400 to-purple-400" />
+            <span className="text-[10px]">Filter</span>
+          </button>
+          <button
             onClick={() => applyRotation('right')}
             disabled={processing}
-            className="text-white hover:bg-white/10 flex-col h-auto py-2 gap-1 text-xs"
+            className="flex flex-col items-center gap-1 text-white/70 hover:text-white disabled:opacity-40 min-w-[60px]"
           >
             <RotateCw size={22} />
-            Putar Kanan
-          </Button>
+            <span className="text-[10px]">Kanan</span>
+          </button>
         </div>
 
-        {/* Filter selector */}
-        <FilterSelector
-          imageDataUrl={current.originalDataUrl}
-          currentFilter={current.filter}
-          onChange={handleFilterChange}
-        />
+        {/* Filter strip */}
+        {showFilterBar && (
+          <div className="border-t border-white/10 pt-2 pb-3">
+            <FilterSelector
+              imageDataUrl={current.originalDataUrl}
+              currentFilter={current.filter}
+              onChange={handleFilterChange}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
