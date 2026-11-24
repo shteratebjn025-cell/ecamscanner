@@ -11,9 +11,13 @@ const FILTER_ORDER: FilterId[] = [
   'auto',
   'magic-color',
   'shadow-reduction',
-  'black-white',
-  'grayscale',
+  'text-erase',
   'lighten',
+  'sharpen',
+  'economy',
+  'grayscale',
+  'black-white',
+  'invert',
 ];
 
 interface FilterSelectorProps {
@@ -74,6 +78,13 @@ export default function FilterSelector({ imageDataUrl, currentFilter, onChange }
               {active && (
                 <div className="absolute top-1 right-1 bg-teal-500 rounded-full p-0.5">
                   <Check size={9} className="text-white" />
+                </div>
+              )}
+
+              {/* OmnisFix "Top 1 Filter" badge */}
+              {filter === 'auto' && (
+                <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-orange-500/90 to-transparent px-1 pt-0.5 pb-2">
+                  <p className="text-[7px] font-bold text-white text-center leading-tight">Top 1 Filter</p>
                 </div>
               )}
 

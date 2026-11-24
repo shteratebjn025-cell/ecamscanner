@@ -6,10 +6,14 @@ export type FilterId =
   | 'original'
   | 'auto'
   | 'magic-color'
+  | 'shadow-reduction'
+  | 'text-erase'
+  | 'lighten'
+  | 'sharpen'
+  | 'economy'
   | 'grayscale'
   | 'black-white'
-  | 'lighten'
-  | 'shadow-reduction';
+  | 'invert';
 
 /** @deprecated Use FilterId — kept for IndexedDB backward-compat */
 export type FilterMode = FilterId | 'document' | 'blackwhite' | 'magiccolor' | 'color';

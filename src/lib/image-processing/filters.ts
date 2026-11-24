@@ -1,12 +1,12 @@
 /**
- * Image Filter Presets — v2.1
+ * Image Filter Presets — v2.2
  *
  * Core algorithm improvement: document background whitening via
  * illumination-aware normalization. This is the key that makes
  * document scanners produce clean white backgrounds.
  *
- * Filters: original, auto (OmnisFix), magic-color, grayscale,
- *          black-white, lighten, shadow-reduction
+ * Filters: original, auto (OmnisFix), magic-color, shadow-reduction,
+ *          text-erase, lighten, sharpen, economy, grayscale, black-white, invert
  */
 
 import type { FilterId, EnhancementSettings } from '@/types';
@@ -86,10 +86,14 @@ async function applyPreset(
         switch (filter) {
           case 'auto':             imageData = presetOmnisFix(imageData, w, h); break;
           case 'magic-color':      imageData = presetMagicColor(imageData, w, h); break;
+          case 'shadow-reduction': imageData = presetShadowReduction(imageData, w, h); break;
+          case 'text-erase':       imageData = presetTextErase(imageData, w, h); break;
+          case 'lighten':          imageData = presetLighten(imageData, w, h); break;
+          case 'sharpen':          imageData = presetSharpen(imageData, w, h); break;
+          case 'economy':          imageData = presetEconomy(imageData, w, h); break;
           case 'grayscale':        imageData = presetGrayscale(imageData); break;
           case 'black-white':      imageData = presetBlackWhite(imageData, w, h, settings); break;
-          case 'lighten':          imageData = presetLighten(imageData, w, h); break;
-          case 'shadow-reduction': imageData = presetShadowReduction(imageData, w, h); break;
+          case 'invert':           imageData = presetInvert(imageData); break;
         }
 
         ctx.putImageData(imageData, 0, 0);
@@ -349,6 +353,111 @@ function presetShadowReduction(src: ImageData, w: number, h: number): ImageData 
   return result;
 }
 
+// ─── Sharpen ──────────────────────────────────────────────────────────────────
+//
+// Strong unsharp mask applied on top of OmnisFix base.
+// Makes text very crisp — equivalent to CamScanner's "Mempertajam".
+
+function presetSharpen(src: ImageData, w: number, h: number): ImageData {
+  // Start from OmnisFix clean base
+  let result = presetOmnisFix(src, w, h);
+
+  // Apply two passes of unsharp mask for extra crispness
+  result = unsharpMask(result, w, h, 1.8, 1.0);
+  result = unsharpMask(result, w, h, 0.8, 0.5);
+
+  return result;
+}
+
+// ─── Text Erase ───────────────────────────────────────────────────────────────
+//
+// Removes dark ink/text from the image, leaving only the paper background.
+// Useful for reusing pre-printed forms or revealing hidden watermarks.
+// Algorithm: aggressive background normalization with high target white,
+// then threshold anything below 200 to white.
+
+function presetTextErase(src: ImageData, w: number, h: number): ImageData {
+  const data = new Uint8ClampedArray(src.data);
+
+  const R = new Float32Array(w * h);
+  const G = new Float32Array(w * h);
+  const B = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    R[i] = data[i*4]; G[i] = data[i*4+1]; B[i] = data[i*4+2];
+  }
+
+  // Large radius to capture wide shadow gradients and text ink areas
+  const radius = Math.max(30, Math.round(Math.min(w, h) * 0.18));
+  const bgR = fastBoxBlurGray(R, w, h, radius);
+  const bgG = fastBoxBlurGray(G, w, h, radius);
+  const bgB = fastBoxBlurGray(B, w, h, radius);
+
+  // Divide by background, push very hard toward white
+  const target = 255;
+  for (let i = 0; i < w * h; i++) {
+    const nr = Math.round((R[i] / Math.max(1, bgR[i])) * target);
+    const ng = Math.round((G[i] / Math.max(1, bgG[i])) * target);
+    const nb = Math.round((B[i] / Math.max(1, bgB[i])) * target);
+    // Soft threshold: pixels below 215 (likely ink) get pushed to 240+
+    const lum = 0.299*nr + 0.587*ng + 0.114*nb;
+    if (lum < 215) {
+      // Fade ink toward white
+      const fade = lum / 215;
+      data[i*4  ] = clamp255(Math.round(255 - (255 - clamp255(nr)) * fade * 0.3));
+      data[i*4+1] = clamp255(Math.round(255 - (255 - clamp255(ng)) * fade * 0.3));
+      data[i*4+2] = clamp255(Math.round(255 - (255 - clamp255(nb)) * fade * 0.3));
+    } else {
+      data[i*4  ] = clamp255(nr);
+      data[i*4+1] = clamp255(ng);
+      data[i*4+2] = clamp255(nb);
+    }
+  }
+
+  return autoLevels(mkImageData(data, w, h), 0.001);
+}
+
+// ─── Economy ──────────────────────────────────────────────────────────────────
+//
+// Low-ink mode: clean white background + light gray text instead of deep black.
+// Reduces toner/ink usage when printed. CamScanner calls this "Hemat".
+// Algorithm: OmnisFix base, then reduce contrast so blacks become mid-grays.
+
+function presetEconomy(src: ImageData, w: number, h: number): ImageData {
+  // Start clean
+  let result = presetOmnisFix(src, w, h);
+
+  // Reduce contrast: bring blacks up toward mid-gray (saves ink)
+  // LUT: 0 → 60, 255 → 255 (linear remap)
+  const data = new Uint8ClampedArray(result.data);
+  const lut  = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    // Map [0..255] → [60..255]
+    lut[i] = clamp255(Math.round(60 + (i / 255) * 195));
+  }
+  for (let i = 0; i < data.length; i += 4) {
+    data[i  ] = lut[data[i  ]];
+    data[i+1] = lut[data[i+1]];
+    data[i+2] = lut[data[i+2]];
+  }
+
+  return mkImageData(data, result.width, result.height);
+}
+
+// ─── Invert ───────────────────────────────────────────────────────────────────
+//
+// Invert all colors — dark background + light text.
+// CamScanner calls this "Balik".
+
+function presetInvert(src: ImageData): ImageData {
+  const data = new Uint8ClampedArray(src.data);
+  for (let i = 0; i < data.length; i += 4) {
+    data[i  ] = 255 - data[i  ];
+    data[i+1] = 255 - data[i+1];
+    data[i+2] = 255 - data[i+2];
+  }
+  return mkImageData(data, src.width, src.height);
+}
+
 // ─── Core image processing helpers ───────────────────────────────────────────
 
 /**
@@ -501,6 +610,11 @@ function normalizeLegacyFilter(filter: string): FilterId {
     case 'blackwhite': return 'black-white';
     case 'magiccolor': return 'magic-color';
     case 'color':      return 'original';
+    case 'lighten':    return 'lighten';
+    case 'sharpen':    return 'sharpen';
+    case 'economy':    return 'economy';
+    case 'invert':     return 'invert';
+    case 'text-erase': return 'text-erase';
     default:           return (filter as FilterId) || 'auto';
   }
 }

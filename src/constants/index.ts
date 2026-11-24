@@ -14,20 +14,28 @@ export const FILTER_LABELS: Record<FilterId, string> = {
   'original':         'Asli',
   'auto':             'OmnisFix',
   'magic-color':      'Magic Color',
-  'grayscale':        'Abu-abu',
-  'black-white':      'Hitam Putih',
-  'lighten':          'Cerahkan',
   'shadow-reduction': 'Tanpa Bayang',
+  'text-erase':       'Tanpa Tulisan',
+  'lighten':          'Cerahkan',
+  'sharpen':          'Mempertajam',
+  'economy':          'Hemat',
+  'grayscale':        'Grayscale',
+  'black-white':      'B&W',
+  'invert':           'Balik',
 };
 
 export const FILTER_DESCS: Record<FilterId, string> = {
   'original':         'Tanpa perubahan',
-  'auto':             'Professional',
-  'magic-color':      'Vivid',
-  'grayscale':        'Halftone',
-  'black-white':      'Klasik',
+  'auto':             'Top 1 Filter',
+  'magic-color':      'Warna vivid',
+  'shadow-reduction': 'Hapus bayangan',
+  'text-erase':       'Hanya background',
   'lighten':          'Background cerah',
-  'shadow-reduction': 'Teks tajam',
+  'sharpen':          'Teks lebih tajam',
+  'economy':          'Tinta hemat',
+  'grayscale':        'Abu-abu',
+  'black-white':      'Hitam putih',
+  'invert':           'Warna terbalik',
 };
 
 // ─── Page sizes ───────────────────────────────────────────────────────────────
