@@ -4,6 +4,7 @@ import { SwitchCamera, X, Image as ImageIcon, Zap, ZapOff, AlertCircle, RefreshC
 import Button from '@/components/ui/Button';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { CropRegion } from '@/types';
+import { detectDocumentRealtime } from '@/lib/image-processing/edge-detection';
 
 interface CameraViewProps {
   onCapture: (dataUrl: string, detectedCrop: CropRegion | null) => void;
@@ -63,84 +64,6 @@ function parseError(err: unknown): ErrorInfo {
   return { title: 'Gagal Membuka Kamera', message: `${name || msg}`, canRetry: true, showGuide: false };
 }
 
-// ─── Real-time document detection menggunakan Sobel di canvas kecil ───────────
-function detectDocumentInFrame(
-  video: HTMLVideoElement,
-): CropRegion | null {
-  if (!video.videoWidth || !video.videoHeight) return null;
-
-  // Proses di resolusi kecil (320px) untuk performa real-time
-  const DETECT_W = 320;
-  const scale = DETECT_W / video.videoWidth;
-  const dw = DETECT_W;
-  const dh = Math.round(video.videoHeight * scale);
-
-  const canvas = document.createElement('canvas');
-  canvas.width  = dw;
-  canvas.height = dh;
-  const ctx = canvas.getContext('2d')!;
-  ctx.drawImage(video, 0, 0, dw, dh);
-
-  const { data } = ctx.getImageData(0, 0, dw, dh);
-
-  // Grayscale + Sobel edge
-  const gray = new Float32Array(dw * dh);
-  for (let i = 0; i < dw * dh; i++) {
-    gray[i] = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
-  }
-
-  let maxE = 0;
-  const edges = new Float32Array(dw * dh);
-  for (let y = 1; y < dh-1; y++) {
-    for (let x = 1; x < dw-1; x++) {
-      const gx = -gray[(y-1)*dw+(x-1)] - 2*gray[y*dw+(x-1)] - gray[(y+1)*dw+(x-1)]
-               +  gray[(y-1)*dw+(x+1)] + 2*gray[y*dw+(x+1)] + gray[(y+1)*dw+(x+1)];
-      const gy = -gray[(y-1)*dw+(x-1)] - 2*gray[(y-1)*dw+x] - gray[(y-1)*dw+(x+1)]
-               +  gray[(y+1)*dw+(x-1)] + 2*gray[(y+1)*dw+x] + gray[(y+1)*dw+(x+1)];
-      const e = Math.sqrt(gx*gx + gy*gy);
-      edges[y*dw+x] = e;
-      if (e > maxE) maxE = e;
-    }
-  }
-
-  if (maxE < 20) return null; // gambar terlalu uniform
-
-  const thresh = maxE * 0.18;
-  const cx = dw/2, cy = dh/2;
-  let tlD=0, trD=0, blD=0, brD=0;
-  let tl={x:dw*0.1,y:dh*0.1}, tr={x:dw*0.9,y:dh*0.1};
-  let bl={x:dw*0.1,y:dh*0.9}, br={x:dw*0.9,y:dh*0.9};
-  let edgePx = 0;
-
-  for (let y = 2; y < dh-2; y++) {
-    for (let x = 2; x < dw-2; x++) {
-      if (edges[y*dw+x] < thresh) continue;
-      edgePx++;
-      if (x<=cx && y<=cy) { const d=Math.hypot(cx-x,cy-y); if(d>tlD){tlD=d;tl={x,y};} }
-      else if (x>cx && y<=cy) { const d=Math.hypot(cx-x,cy-y); if(d>trD){trD=d;tr={x,y};} }
-      else if (x<=cx && y>cy) { const d=Math.hypot(cx-x,cy-y); if(d>blD){blD=d;bl={x,y};} }
-      else { const d=Math.hypot(cx-x,cy-y); if(d>brD){brD=d;br={x,y};} }
-    }
-  }
-
-  if (edgePx < dw*dh*0.004) return null;
-
-  // Minimal area coverage
-  const qW = Math.max(tr.x,br.x) - Math.min(tl.x,bl.x);
-  const qH = Math.max(bl.y,br.y) - Math.min(tl.y,tr.y);
-  if (qW < dw*0.25 || qH < dh*0.25) return null;
-
-  // Skala balik ke video koordinat
-  const sx = video.videoWidth / dw;
-  const sy = video.videoHeight / dh;
-  return {
-    topLeft:     { x: tl.x*sx, y: tl.y*sy },
-    topRight:    { x: tr.x*sx, y: tr.y*sy },
-    bottomRight: { x: br.x*sx, y: br.y*sy },
-    bottomLeft:  { x: bl.x*sx, y: bl.y*sy },
-  };
-}
-
 // ─── Komponen utama ───────────────────────────────────────────────────────────
 
 export default function CameraView({ onCapture, onClose, onGalleryFallback }: CameraViewProps) {
@@ -176,7 +99,7 @@ export default function CameraView({ onCapture, onClose, onGalleryFallback }: Ca
       // Jalankan deteksi setiap 150ms agar tidak terlalu berat
       if (now - lastDetect > 150) {
         lastDetect = now;
-        const quad = detectDocumentInFrame(video);
+        const quad = detectDocumentRealtime(video);
         detectedRef.current = quad;
 
         if (quad) {
