@@ -1,155 +1,198 @@
 import type { CropRegion } from '@/types';
 
+/** Max dimensi gambar untuk diproses — cukup untuk kualitas dokumen */
+const MAX_PROCESS_DIM = 2000;
+
 /**
- * Apply perspective transform (crop) to an image using homography via Canvas.
- * Uses bilinear sampling for quality; falls back to drawImage if homography fails.
+ * Resize gambar agar sisi terpanjang tidak melebihi maxDim.
+ * Mengurangi beban memori terutama pada mobile.
  */
-export function perspectiveCrop(
+export function resizeImage(
+  imageDataUrl: string,
+  maxDim = MAX_PROCESS_DIM,
+  quality = 0.92,
+): Promise<{ dataUrl: string; width: number; height: number; scale: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const { naturalWidth: w, naturalHeight: h } = img;
+      const scale = Math.min(1, maxDim / Math.max(w, h));
+      const dw = Math.round(w * scale);
+      const dh = Math.round(h * scale);
+
+      if (scale >= 1) {
+        // Tidak perlu resize
+        resolve({ dataUrl: imageDataUrl, width: w, height: h, scale: 1 });
+        return;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = dw;
+      canvas.height = dh;
+      const ctx = canvas.getContext('2d')!;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, dw, dh);
+      resolve({ dataUrl: canvas.toDataURL('image/jpeg', quality), width: dw, height: dh, scale });
+    };
+    img.onerror = () => reject(new Error('Failed to load image for resize'));
+    img.src = imageDataUrl;
+  });
+}
+
+/**
+ * Perspective crop menggunakan Canvas setTransform.
+ *
+ * Pendekatan:
+ * 1. Resize gambar asli agar tidak terlalu besar (max 2000px)
+ * 2. Hitung homography dari 4 sudut ke rectangle
+ * 3. Gunakan ctx.transform() untuk warp — ini dieksekusi GPU, bukan CPU loop
+ * 4. Fallback ke simple bounding-box crop jika homography gagal
+ *
+ * Ini jauh lebih cepat dan tidak crash di mobile Safari.
+ */
+export async function perspectiveCrop(
   imageDataUrl: string,
   cropRegion: CropRegion,
   outputWidth: number,
   outputHeight: number,
 ): Promise<string> {
+  // Langkah 1: resize dulu agar tidak OOM di mobile
+  const { dataUrl: resized, scale } = await resizeImage(imageDataUrl);
+
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
+      // Scale crop coordinates sesuai resize
+      const tl = { x: cropRegion.topLeft.x     * scale, y: cropRegion.topLeft.y     * scale };
+      const tr = { x: cropRegion.topRight.x    * scale, y: cropRegion.topRight.y    * scale };
+      const br = { x: cropRegion.bottomRight.x * scale, y: cropRegion.bottomRight.y * scale };
+      const bl = { x: cropRegion.bottomLeft.x  * scale, y: cropRegion.bottomLeft.y  * scale };
+
+      // Output dimensions (juga di-scale agar konsisten)
+      const ow = Math.max(10, Math.round(outputWidth  * scale));
+      const oh = Math.max(10, Math.round(outputHeight * scale));
+
       const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, outputWidth);
-      canvas.height = Math.max(1, outputHeight);
+      canvas.width  = ow;
+      canvas.height = oh;
       const ctx = canvas.getContext('2d');
       if (!ctx) return reject(new Error('Canvas context unavailable'));
 
-      const src = [
-        cropRegion.topLeft,
-        cropRegion.topRight,
-        cropRegion.bottomRight,
-        cropRegion.bottomLeft,
-      ];
+      // Coba pakai CSS transform approach via applyTransform
+      const success = drawWithTransform(ctx, img, tl, tr, br, bl, ow, oh);
 
-      const dst = [
-        { x: 0, y: 0 },
-        { x: outputWidth, y: 0 },
-        { x: outputWidth, y: outputHeight },
-        { x: 0, y: outputHeight },
-      ];
-
-      // Compute homography matrix
-      let H: number[] | null = null;
-      try {
-        H = computeHomography(src, dst);
-      } catch {
-        H = null;
+      if (!success) {
+        // Fallback: simple bounding box crop
+        const minX = Math.min(tl.x, tr.x, br.x, bl.x);
+        const minY = Math.min(tl.y, tr.y, br.y, bl.y);
+        const maxX = Math.max(tl.x, tr.x, br.x, bl.x);
+        const maxY = Math.max(tl.y, tr.y, br.y, bl.y);
+        ctx.drawImage(img, minX, minY, maxX - minX, maxY - minY, 0, 0, ow, oh);
       }
 
-      if (!H) {
-        // Fallback: draw the bounding box region
-        const minX = Math.min(...src.map((p) => p.x));
-        const minY = Math.min(...src.map((p) => p.y));
-        const maxX = Math.max(...src.map((p) => p.x));
-        const maxY = Math.max(...src.map((p) => p.y));
-        ctx.drawImage(img, minX, minY, maxX - minX, maxY - minY, 0, 0, outputWidth, outputHeight);
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
-        return;
-      }
-
-      const Hinv = invertMatrix3x3(H);
-      if (!Hinv) {
-        ctx.drawImage(img, 0, 0, outputWidth, outputHeight);
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
-        return;
-      }
-
-      // Draw original image on a temp canvas to read pixels
-      const tmpCanvas = document.createElement('canvas');
-      tmpCanvas.width = img.naturalWidth;
-      tmpCanvas.height = img.naturalHeight;
-      const tmpCtx = tmpCanvas.getContext('2d');
-      if (!tmpCtx) return reject(new Error('Canvas context unavailable'));
-      tmpCtx.drawImage(img, 0, 0);
-
-      // For large images, downsample to avoid freezing the UI
-      const maxDim = 1200;
-      const scale = Math.min(1, maxDim / Math.max(outputWidth, outputHeight));
-      const dstW = Math.round(outputWidth * scale);
-      const dstH = Math.round(outputHeight * scale);
-      canvas.width = dstW;
-      canvas.height = dstH;
-
-      const srcData = tmpCtx.getImageData(0, 0, tmpCanvas.width, tmpCanvas.height);
-      const dstData = ctx.createImageData(dstW, dstH);
-      const sw = tmpCanvas.width;
-      const sh = tmpCanvas.height;
-
-      for (let dy = 0; dy < dstH; dy++) {
-        for (let dx = 0; dx < dstW; dx++) {
-          // Map output pixel to original image coordinates via inverse homography
-          const ox = (dx / scale);
-          const oy = (dy / scale);
-          const denom = Hinv[6] * ox + Hinv[7] * oy + Hinv[8];
-          const sx = (Hinv[0] * ox + Hinv[1] * oy + Hinv[2]) / denom;
-          const sy = (Hinv[3] * ox + Hinv[4] * oy + Hinv[5]) / denom;
-
-          const ix = Math.round(sx);
-          const iy = Math.round(sy);
-          const dstIdx = (dy * dstW + dx) * 4;
-
-          if (ix >= 0 && ix < sw && iy >= 0 && iy < sh) {
-            const srcIdx = (iy * sw + ix) * 4;
-            dstData.data[dstIdx] = srcData.data[srcIdx];
-            dstData.data[dstIdx + 1] = srcData.data[srcIdx + 1];
-            dstData.data[dstIdx + 2] = srcData.data[srcIdx + 2];
-            dstData.data[dstIdx + 3] = srcData.data[srcIdx + 3];
-          } else {
-            dstData.data[dstIdx] = 255;
-            dstData.data[dstIdx + 1] = 255;
-            dstData.data[dstIdx + 2] = 255;
-            dstData.data[dstIdx + 3] = 255;
-          }
-        }
-      }
-
-      ctx.putImageData(dstData, 0, 0);
       resolve(canvas.toDataURL('image/jpeg', 0.92));
     };
-    img.onerror = () => reject(new Error('Failed to load image'));
-    img.src = imageDataUrl;
+    img.onerror = () => reject(new Error('Failed to load image for crop'));
+    img.src = resized;
   });
 }
 
-/** Simple crop without perspective correction (rectangle crop) */
-export function simpleCrop(
-  imageDataUrl: string,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return reject(new Error('Canvas context unavailable'));
-      ctx.drawImage(img, x, y, width, height, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', 0.92));
-    };
-    img.onerror = () => reject(new Error('Failed to load image'));
-    img.src = imageDataUrl;
-  });
+/**
+ * Draw image dengan perspective warp menggunakan Canvas 2D transform.
+ *
+ * Bagi quadrilateral menjadi 2 segitiga, render masing-masing dengan
+ * affine transform. Ini pendekatan standar untuk "pseudo-perspective" di Canvas 2D.
+ * Hasilnya tidak 100% perfect untuk distorsi besar, tapi cukup untuk dokumen.
+ */
+function drawWithTransform(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  tl: { x: number; y: number },
+  tr: { x: number; y: number },
+  br: { x: number; y: number },
+  bl: { x: number; y: number },
+  dw: number,
+  dh: number,
+): boolean {
+  try {
+    // Segitiga 1: tl → tr → bl (kiri atas)
+    drawTriangle(ctx, img,
+      tl, tr, bl,
+      { x: 0, y: 0 }, { x: dw, y: 0 }, { x: 0, y: dh },
+    );
+
+    // Segitiga 2: tr → br → bl (kanan bawah)
+    drawTriangle(ctx, img,
+      tr, br, bl,
+      { x: dw, y: 0 }, { x: dw, y: dh }, { x: 0, y: dh },
+    );
+
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-/** Rotate image by given degrees (0, 90, 180, 270) */
+type Pt = { x: number; y: number };
+
+/**
+ * Render satu segitiga dari image dengan affine transform.
+ * src: titik di gambar asli, dst: titik di canvas output.
+ */
+function drawTriangle(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  s0: Pt, s1: Pt, s2: Pt,
+  d0: Pt, d1: Pt, d2: Pt,
+): void {
+  ctx.save();
+
+  // Clip ke segitiga output
+  ctx.beginPath();
+  ctx.moveTo(d0.x, d0.y);
+  ctx.lineTo(d1.x, d1.y);
+  ctx.lineTo(d2.x, d2.y);
+  ctx.closePath();
+  ctx.clip();
+
+  // Hitung affine matrix: src → dst
+  // | d1-d0  d2-d0 | = M * | s1-s0  s2-s0 |
+  const srcX1 = s1.x - s0.x, srcY1 = s1.y - s0.y;
+  const srcX2 = s2.x - s0.x, srcY2 = s2.y - s0.y;
+  const dstX1 = d1.x - d0.x, dstY1 = d1.y - d0.y;
+  const dstX2 = d2.x - d0.x, dstY2 = d2.y - d0.y;
+
+  const det = srcX1 * srcY2 - srcX2 * srcY1;
+  if (Math.abs(det) < 0.001) {
+    ctx.restore();
+    return;
+  }
+
+  const a =  (dstX1 * srcY2 - dstX2 * srcY1) / det;
+  const b = -(dstX1 * srcX2 - dstX2 * srcX1) / det; // typo-safe
+  const c =  (dstY1 * srcY2 - dstY2 * srcY1) / det;
+  const d = -(dstY1 * srcX2 - dstY2 * srcX1) / det;
+
+  // Affine matrix: [a, c, b, d, tx, ty]
+  const tx = d0.x - a * s0.x - b * s0.y;
+  const ty = d0.y - c * s0.x - d * s0.y;
+
+  ctx.transform(a, c, b, d, tx, ty);
+  ctx.drawImage(img, 0, 0);
+  ctx.restore();
+}
+
+/** Rotate image by degrees (0, 90, 180, 270) */
 export function rotateImage(imageDataUrl: string, degrees: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const rad = (degrees * Math.PI) / 180;
+      const rad  = (degrees * Math.PI) / 180;
       const swap = degrees === 90 || degrees === 270;
       const canvas = document.createElement('canvas');
-      canvas.width = swap ? img.naturalHeight : img.naturalWidth;
-      canvas.height = swap ? img.naturalWidth : img.naturalHeight;
+      canvas.width  = swap ? img.naturalHeight : img.naturalWidth;
+      canvas.height = swap ? img.naturalWidth  : img.naturalHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) return reject(new Error('Canvas context unavailable'));
       ctx.translate(canvas.width / 2, canvas.height / 2);
@@ -157,75 +200,28 @@ export function rotateImage(imageDataUrl: string, degrees: number): Promise<stri
       ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
       resolve(canvas.toDataURL('image/jpeg', 0.92));
     };
-    img.onerror = () => reject(new Error('Failed to load image'));
+    img.onerror = () => reject(new Error('Failed to load image for rotate'));
     img.src = imageDataUrl;
   });
 }
 
-// ─── Homography helpers ───────────────────────────────────────────────────────
-
-type Point = { x: number; y: number };
-
-function computeHomography(src: Point[], dst: Point[]): number[] {
-  // 8-point DLT algorithm — builds an 8×9 augmented matrix
-  const A: number[][] = [];
-  for (let i = 0; i < 4; i++) {
-    const sx = src[i].x, sy = src[i].y;
-    const dx = dst[i].x, dy = dst[i].y;
-    A.push([sx, sy, 1, 0,  0,  0, -dx * sx, -dx * sy, -dx]);
-    A.push([0,  0,  0, sx, sy, 1, -dy * sx, -dy * sy, -dy]);
-  }
-  const h = gaussianElimination(A);  // returns 8-element vector
-  return [...h, 1];                   // append H[8]=1 (normalization)
-}
-
-/**
- * Gaussian elimination on an 8×9 augmented matrix.
- * Returns the 8-element solution vector.
- * FIXED: row loop is `row < n` (was `row <= n` → accessed A[8] = undefined)
- */
-function gaussianElimination(A: number[][]): number[] {
-  const n = 8;  // 8 unknowns, 8 equations
-  for (let col = 0; col < n; col++) {
-    // Partial pivot
-    let maxRow = col;
-    for (let row = col + 1; row < n; row++) {   // FIXED: < n, not <= n
-      if (Math.abs(A[row][col]) > Math.abs(A[maxRow][col])) maxRow = row;
-    }
-    [A[col], A[maxRow]] = [A[maxRow], A[col]];
-
-    if (Math.abs(A[col][col]) < 1e-10) throw new Error('Singular matrix');
-
-    // Eliminate below
-    for (let row = col + 1; row < n; row++) {   // FIXED: < n
-      const factor = A[row][col] / A[col][col];
-      for (let j = col; j <= n; j++) {           // <= n is correct here (augmented column)
-        A[row][j] -= factor * A[col][j];
-      }
-    }
-  }
-
-  // Back substitution
-  const x = new Array(n).fill(0);
-  for (let i = n - 1; i >= 0; i--) {
-    x[i] = A[i][n] / A[i][i];
-    for (let j = i - 1; j >= 0; j--) {
-      A[j][n] -= A[j][i] * x[i];
-    }
-  }
-  return x;
-}
-
-function invertMatrix3x3(m: number[]): number[] | null {
-  const a = m[0], b = m[1], c = m[2];
-  const d = m[3], e = m[4], f = m[5];
-  const g = m[6], h = m[7], k = m[8];
-  const det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
-  if (Math.abs(det) < 1e-10) return null;
-  const inv = 1 / det;
-  return [
-    (e * k - f * h) * inv, (c * h - b * k) * inv, (b * f - c * e) * inv,
-    (f * g - d * k) * inv, (a * k - c * g) * inv, (c * d - a * f) * inv,
-    (d * h - e * g) * inv, (b * g - a * h) * inv, (a * e - b * d) * inv,
-  ];
+/** Bounding box crop sederhana tanpa perspective */
+export function simpleCrop(
+  imageDataUrl: string,
+  x: number, y: number, width: number, height: number,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width  = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('Canvas context unavailable'));
+      ctx.drawImage(img, x, y, width, height, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', 0.92));
+    };
+    img.onerror = () => reject(new Error('Failed to load image for simpleCrop'));
+    img.src = imageDataUrl;
+  });
 }

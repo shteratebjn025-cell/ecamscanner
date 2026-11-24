@@ -3,7 +3,7 @@ import { useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { ScannedPage, CropRegion, FilterMode, AppStep } from '@/types';
 import { detectEdges, defaultCropRegion } from '@/lib/image-processing/edge-detection';
-import { perspectiveCrop } from '@/lib/image-processing/crop';
+import { perspectiveCrop, resizeImage } from '@/lib/image-processing/crop';
 import { applyFilter } from '@/lib/image-processing/filters';
 import { saveDocumentEverywhere } from '@/lib/storage/documents';
 import { generateDocumentName } from '@/lib/utils/date';
@@ -71,32 +71,33 @@ export function useScanner() {
 
   // Called when user captures/selects an image
   const handleImageAcquired = useCallback(async (dataUrl: string) => {
-    setState((s) => ({ ...s, processing: true, currentImage: dataUrl, error: null }));
+    setState((s) => ({ ...s, processing: true, currentImage: null, error: null }));
     try {
+      // Resize dulu agar tidak OOM di mobile (max 2000px)
+      const { dataUrl: resized } = await resizeImage(dataUrl, 2000);
+
       const img = new Image();
       await new Promise<void>((res, rej) => {
         img.onload = () => res();
         img.onerror = () => rej(new Error('Image load failed'));
-        img.src = dataUrl;
+        img.src = resized;
       });
 
-      const crop = await detectEdges(dataUrl, img.naturalWidth, img.naturalHeight);
+      const crop = await detectEdges(resized, img.naturalWidth, img.naturalHeight);
       const finalCrop = crop ?? defaultCropRegion(img.naturalWidth, img.naturalHeight);
 
       setState((s) => ({
         ...s,
-        currentImage: dataUrl,
+        currentImage: resized,
         currentCrop: finalCrop,
         processing: false,
         step: 'crop',
       }));
     } catch {
-      // Even if edge detection fails, still go to crop with full-image default
       setState((s) => ({
         ...s,
-        currentCrop: s.currentImage
-          ? null  // CropEditor will use defaultCropRegion when initialCrop is null
-          : null,
+        currentImage: dataUrl,
+        currentCrop: null,
         processing: false,
         step: 'crop',
       }));
@@ -275,7 +276,11 @@ async function processCrop(imageDataUrl: string, crop: CropRegion): Promise<Scan
     img.src = imageDataUrl;
   });
 
+  const { naturalWidth: imgW, naturalHeight: imgH } = img;
+
   const tl = crop.topLeft, tr = crop.topRight, br = crop.bottomRight, bl = crop.bottomLeft;
+
+  // Hitung output dimensions dari panjang sisi crop
   const w = Math.max(100, Math.round(Math.max(
     Math.hypot(tr.x - tl.x, tr.y - tl.y),
     Math.hypot(br.x - bl.x, br.y - bl.y),
@@ -285,14 +290,23 @@ async function processCrop(imageDataUrl: string, crop: CropRegion): Promise<Scan
     Math.hypot(br.x - tr.x, br.y - tr.y),
   )));
 
-  const cropped   = await perspectiveCrop(imageDataUrl, crop, w, h);
+  // Validasi: crop region harus dalam batas gambar
+  const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+  const safeCrop: CropRegion = {
+    topLeft:     { x: clamp(tl.x, 0, imgW), y: clamp(tl.y, 0, imgH) },
+    topRight:    { x: clamp(tr.x, 0, imgW), y: clamp(tr.y, 0, imgH) },
+    bottomRight: { x: clamp(br.x, 0, imgW), y: clamp(br.y, 0, imgH) },
+    bottomLeft:  { x: clamp(bl.x, 0, imgW), y: clamp(bl.y, 0, imgH) },
+  };
+
+  const cropped   = await perspectiveCrop(imageDataUrl, safeCrop, w, h);
   const processed = await applyFilter(cropped, 'auto');
 
   return {
     id: uuidv4(),
-    originalDataUrl: cropped,    // post-crop image is the new "original" for editing
+    originalDataUrl:  cropped,
     processedDataUrl: processed,
-    cropRegion: crop,
+    cropRegion: safeCrop,
     filter: 'auto' as FilterMode,
     rotation: 0,
     width: w,

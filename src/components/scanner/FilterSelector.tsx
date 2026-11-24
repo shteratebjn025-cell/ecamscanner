@@ -21,18 +21,36 @@ export default function FilterSelector({ imageDataUrl, currentFilter, onChange }
 
   useEffect(() => {
     let cancelled = false;
+
     const generate = async () => {
-      const results: Partial<Record<FilterMode, string>> = {};
+      // Buat preview kecil dulu (200px) agar cepat
+      const makeThumb = (src: string): Promise<string> => new Promise((res) => {
+        const i = new Image();
+        i.onload = () => {
+          const s = Math.min(1, 200 / Math.max(i.naturalWidth, i.naturalHeight));
+          const c = document.createElement('canvas');
+          c.width  = Math.round(i.naturalWidth  * s);
+          c.height = Math.round(i.naturalHeight * s);
+          c.getContext('2d')!.drawImage(i, 0, 0, c.width, c.height);
+          res(c.toDataURL('image/jpeg', 0.7));
+        };
+        i.onerror = () => res(src);
+        i.src = src;
+      });
+
+      const thumb = await makeThumb(imageDataUrl);
+
       for (const f of FILTERS) {
         if (cancelled) return;
         try {
-          results[f] = await applyFilter(imageDataUrl, f);
+          const preview = await applyFilter(thumb, f);
+          if (!cancelled) setPreviews((p) => ({ ...p, [f]: preview }));
         } catch {
-          results[f] = imageDataUrl;
+          if (!cancelled) setPreviews((p) => ({ ...p, [f]: thumb }));
         }
-        if (!cancelled) setPreviews({ ...results });
       }
     };
+
     generate();
     return () => { cancelled = true; };
   }, [imageDataUrl]);
