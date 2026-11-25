@@ -117,7 +117,7 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
     onError,
     autoCaptureConfig,
     stabilityConfig,
-    detectionIntervalMs = 150,
+    detectionIntervalMs = 200,
   } = options;
 
   // ─── State ────────────────────────────────────────────────────────────────

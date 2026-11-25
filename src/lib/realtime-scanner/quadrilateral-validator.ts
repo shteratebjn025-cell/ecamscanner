@@ -75,7 +75,7 @@ export function validateQuadrilateral(
   if (ar < 0.1 || ar > 10) return false;
 
   // 7. No corner is exactly at the frame boundary (not the frame edge itself)
-  const margin = Math.min(videoW, videoH) * 0.02;
+  const margin = Math.min(videoW, videoH) * 0.01;
   for (const p of pts) {
     if (p.x < margin || p.y < margin || p.x > videoW - margin || p.y > videoH - margin) {
       return false;

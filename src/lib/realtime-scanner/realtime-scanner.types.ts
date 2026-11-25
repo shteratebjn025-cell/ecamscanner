@@ -95,16 +95,18 @@ export interface QualityResult {
 }
 
 export const QUALITY_THRESHOLDS = {
-  /** Minimum normalised variance-of-Laplacian to pass sharpness check. */
-  minSharpness: 0.012,
-  /** Minimum acceptable mean luminance. */
-  minLuminance: 40,
+  /** Minimum normalised variance-of-Laplacian to pass sharpness check.
+   *  At proxy 400px, normal handheld → ~0.015–0.045. Blurry → <0.005.
+   *  Threshold 0.008 accepts most handheld shots, rejects heavy motion blur. */
+  minSharpness: 0.008,
+  /** Minimum acceptable mean luminance (0–255). */
+  minLuminance: 30,
   /** Maximum acceptable mean luminance. */
-  maxLuminance: 230,
+  maxLuminance: 240,
   /** Maximum fraction of frame that may be overexposed. */
-  maxOverexposed: 0.20,
+  maxOverexposed: 0.25,
   /** Maximum fraction of frame that may be underexposed. */
-  maxUnderexposed: 0.30,
+  maxUnderexposed: 0.40,
 } as const;
 
 // ─── Capture ──────────────────────────────────────────────────────────────────

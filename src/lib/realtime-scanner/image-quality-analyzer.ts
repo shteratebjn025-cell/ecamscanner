@@ -70,19 +70,22 @@ function luminanceStats(gray: Float32Array): LuminanceStats {
 // ─── Normalisation ────────────────────────────────────────────────────────────
 
 /**
- * Variance of Laplacian grows quadratically with image resolution.
- * Normalise it so the threshold is resolution-independent.
+ * Variance of Laplacian normalisation.
  *
- * We divide by (W * H)^0.5 to get a per-pixel-ish score and then
- * further scale by a calibration constant derived empirically at 320px.
+ * Raw variance values at proxy resolution (400px):
+ * - Very blurry (motion blur):  5 – 50
+ * - Soft focus / slight shake:  50 – 200
+ * - Normal handheld sharp:      200 – 600
+ * - Very sharp (tripod):        600+
+ *
+ * We normalise by area so the threshold is resolution-independent.
+ * Dividing by (area * 0.1) maps "normal sharp" → ~0.015–0.045,
+ * which comfortably exceeds the minSharpness threshold of 0.008.
  */
 function normaliseSharpness(rawVariance: number, W: number, H: number): number {
   const area = W * H;
   if (area === 0) return 0;
-  // Raw variance at 320×240 for a sharp image ≈ 400–800.
-  // Normalise to [0, 1] where 1 = very sharp.
-  const normalised = rawVariance / (area * 0.5);
-  return Math.min(1, normalised);
+  return Math.min(1, rawVariance / (area * 0.1));
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

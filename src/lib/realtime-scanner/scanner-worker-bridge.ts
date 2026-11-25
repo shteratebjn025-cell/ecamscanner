@@ -24,7 +24,7 @@ interface PendingJob {
   timer:   ReturnType<typeof setTimeout>;
 }
 
-const JOB_TIMEOUT_MS = 2000; // If the worker doesn't respond in 2 s, fall back
+const JOB_TIMEOUT_MS = 800; // If the worker doesn't respond in 800ms, fall back to main thread
 let jobCounter = 0;
 
 export class ScannerWorkerBridge {
