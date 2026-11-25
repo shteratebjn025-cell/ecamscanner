@@ -304,22 +304,24 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
         }
 
         // Update smoothed corners for overlay (EMA — prevents blink/jitter)
-        const rawForSmooth = lastCornersRef.current;
-        if (rawForSmooth) {
+        // Input: validCorners (the actual detection result, independent of status hysteresis)
+        if (validCorners) {
           noDetectFrames.current = 0;
           if (!smoothedCornersRef.current) {
-            // First detection: snap immediately (no previous position to blend from)
-            smoothedCornersRef.current = rawForSmooth;
+            smoothedCornersRef.current = validCorners;
           } else {
-            // EMA: alpha controls responsiveness vs smoothness
-            // 0.35 = smooth enough to suppress jitter, responsive enough to track motion
-            smoothedCornersRef.current = emaCorners(smoothedCornersRef.current, rawForSmooth, 0.35);
+            smoothedCornersRef.current = emaCorners(smoothedCornersRef.current, validCorners, 0.35);
+          }
+        } else if (detResult.corners && detResult.status === 'low-confidence') {
+          // Low-confidence: also smooth, but increment miss for clearing purposes
+          noDetectFrames.current = 0;
+          if (!smoothedCornersRef.current) {
+            smoothedCornersRef.current = detResult.corners;
+          } else {
+            smoothedCornersRef.current = emaCorners(smoothedCornersRef.current, detResult.corners, 0.25);
           }
         } else {
-          // No detection: increment miss counter
           noDetectFrames.current++;
-          // Only clear smoothed corners after 8 consecutive misses (~1.2s at 150ms interval)
-          // This prevents blink when detector briefly loses track for 1-2 frames
           if (noDetectFrames.current >= 8) {
             smoothedCornersRef.current = null;
           }

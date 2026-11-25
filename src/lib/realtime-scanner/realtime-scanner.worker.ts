@@ -1,16 +1,15 @@
 /**
- * realtime-scanner.worker.ts  — v4.0
+ * realtime-scanner.worker.ts  — v4.1
  *
- * Web Worker for document detection.
+ * Web Worker for real-time document detection.
  *
- * Detection strategy (priority order):
- * 1. OpenCV.js — findContours + approxPolyDP (most accurate, loads lazily)
- * 2. Pure-JS Canny + morphological dilation (fallback, always available)
+ * Uses pure-JS Canny + morphological dilation pipeline only.
+ * OpenCV.js is NOT loaded here — importScripts('/opencv.js') would block
+ * the worker thread for 2-5 seconds on mobile, preventing all DETECT
+ * messages from being processed during that time.
  *
- * OpenCV.js (~10MB) is loaded via importScripts('/opencv.js') on first DETECT
- * message. Subsequent calls reuse the initialised cv object. While OpenCV is
- * loading or if it fails, every frame falls back to the pure-JS pipeline so
- * there is no gap in real-time detection.
+ * OpenCV.js is used only on the main thread for post-capture detection
+ * (see opencv-full-detector.ts), where a one-time 2-5s delay is acceptable.
  *
  * Protocol:
  * Main → Worker:
@@ -33,16 +32,10 @@ import type {
   DetectionStatus,
 } from './realtime-scanner.types';
 import type { CropRegion, Point } from '@/types';
-import { ensureOpenCV, isOpenCVReady, detectWithOpenCV } from './opencv-detector';
 
-// Signal ready immediately (pure-JS fallback is available from the start)
+// Signal ready immediately
 const readyMsg: ScanWorkerOutgoing = { type: 'READY', jobId: '' };
 self.postMessage(readyMsg);
-
-// Kick off OpenCV load in background — don't await, detection continues meanwhile
-ensureOpenCV().then(ok => {
-  console.debug('[ScanWorker] OpenCV.js', ok ? 'ready ✓' : 'unavailable — using pure-JS fallback');
-});
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
@@ -57,26 +50,9 @@ self.addEventListener('message', (event: MessageEvent<ScanWorkerIncoming>) => {
       if (!msg.imageData || !msg.originalWidth || !msg.originalHeight) {
         throw new Error('Missing imageData or dimensions');
       }
-
-      let result: RealtimeDetectionResult;
-
-      if (isOpenCVReady()) {
-        // ── OpenCV.js path (accurate contour-based detection) ───────────────
-        try {
-          result = detectWithOpenCV(msg.imageData, msg.originalWidth, msg.originalHeight);
-        } catch (cvErr) {
-          // OpenCV threw (e.g. OOM) — fall back to pure-JS silently
-          console.warn('[ScanWorker] OpenCV detection error, falling back:', cvErr);
-          result = runPureJSDetection(msg.imageData, msg.originalWidth, msg.originalHeight);
-        }
-      } else {
-        // ── Pure-JS path (always available, used while OpenCV loads) ────────
-        result = runPureJSDetection(msg.imageData, msg.originalWidth, msg.originalHeight);
-      }
-
+      const result = runDetection(msg.imageData, msg.originalWidth, msg.originalHeight);
       const out: ScanWorkerOutgoing = { type: 'RESULT', jobId: msg.jobId, result };
       self.postMessage(out);
-
     } catch (err) {
       const out: ScanWorkerOutgoing = {
         type: 'ERROR',
@@ -88,13 +64,12 @@ self.addEventListener('message', (event: MessageEvent<ScanWorkerIncoming>) => {
   }
 });
 
-// ─── Pure-JS fallback detection pipeline ─────────────────────────────────────
-// Kept in sync with document-detector.ts v3.0
+// ─── Detection pipeline ───────────────────────────────────────────────────────
 
 const MIN_CONFIDENCE_SHOW  = 0.15;
 const MIN_CONFIDENCE_FOUND = 0.22;
 
-function runPureJSDetection(
+function runDetection(
   imageData: ImageData,
   origW: number,
   origH: number,
@@ -135,7 +110,7 @@ function runPureJSDetection(
   return { found: best.confidence >= MIN_CONFIDENCE_FOUND, confidence: best.confidence, corners, status };
 }
 
-// ─── Pure-JS Canny pipeline ───────────────────────────────────────────────────
+// ─── Canny pipeline ───────────────────────────────────────────────────────────
 
 function gaussianBlur5(src: Float32Array, W: number, H: number): Float32Array {
   const k = [1, 4, 6, 4, 1];
@@ -248,7 +223,7 @@ function dilate(edges: Uint8Array, W: number, H: number): Uint8Array {
   return out;
 }
 
-// ─── Pure-JS quad finder ──────────────────────────────────────────────────────
+// ─── Quad finder ──────────────────────────────────────────────────────────────
 
 function isConvex(pts: Point[]): boolean {
   const n = pts.length; let sign = 0;
@@ -341,7 +316,7 @@ function findBestQuad(
     if (ar<0.12||ar>8) continue;
     const areaRatio = quadArea(pts)/(W*H);
     if (areaRatio<0.06) continue;
-    if (areaRatio>0.80) continue;  // too large → frame/laptop boundary
+    if (areaRatio>0.80) continue;
     if (!isConvex(pts)) continue;
     if (pts.some(p=>p.x<0||p.y<0||p.x>=W||p.y>=H)) continue;
     const support = edgeSupport(edges,W,H,pts);
