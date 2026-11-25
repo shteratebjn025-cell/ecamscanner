@@ -89,6 +89,21 @@ function shouldDetect(now: number, last: number, intervalMs: number): boolean {
   return now - last >= intervalMs;
 }
 
+/** Exponential moving average on CropRegion corners for overlay smoothing. */
+function emaCorners(
+  prev: CropRegion,
+  next: CropRegion,
+  alpha: number, // 0..1 — higher = more responsive, lower = smoother
+): CropRegion {
+  const lerp = (a: number, b: number) => a + alpha * (b - a);
+  return {
+    topLeft:     { x: lerp(prev.topLeft.x,     next.topLeft.x),     y: lerp(prev.topLeft.y,     next.topLeft.y)     },
+    topRight:    { x: lerp(prev.topRight.x,    next.topRight.x),    y: lerp(prev.topRight.y,    next.topRight.y)    },
+    bottomRight: { x: lerp(prev.bottomRight.x, next.bottomRight.x), y: lerp(prev.bottomRight.y, next.bottomRight.y) },
+    bottomLeft:  { x: lerp(prev.bottomLeft.x,  next.bottomLeft.x),  y: lerp(prev.bottomLeft.y,  next.bottomLeft.y)  },
+  };
+}
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useRealtimeScanner(options: RealtimeScannerOptions): {
@@ -137,10 +152,14 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
   const captureCtrlRef   = useRef(new AutoCaptureController(autoCaptureConfig));
   const workerBridgeRef  = useRef(new ScannerWorkerBridge());
   const lastCornersRef   = useRef<CropRegion | null>(null);
+  // Smoothed corners for overlay rendering — EMA prevents blink/jitter
+  const smoothedCornersRef = useRef<CropRegion | null>(null);
   // Track last status for the render loop without React state reads (avoids stale closure)
   const lastStatusRef    = useRef<DetectionStatus>('not-found');
   // Guard: prevent multiple concurrent detection jobs (mobile can be slow)
   const detectionRunning = useRef(false);
+  // Hysteresis: track how many consecutive frames had no detection
+  const noDetectFrames   = useRef(0);
 
   // ─── Worker init (once) ───────────────────────────────────────────────────
   useEffect(() => {
@@ -226,6 +245,8 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
         );
 
         // 6. Build detection status for UI
+        // Status hysteresis: once stabilizing/ready, don't snap back to detecting
+        // on a single missed frame — require noDetectFrames >= 3 to downgrade
         let status: DetectionStatus = 'not-found';
         if (validCorners) {
           if (stability.isStable) {
@@ -236,8 +257,15 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
             status = detResult.status === 'low-confidence' ? 'low-confidence' : 'detecting';
           }
         } else if (detResult.corners && detResult.status === 'low-confidence') {
-          // Show low-confidence overlay even if quad validation failed on marginal corners
           status = 'low-confidence';
+        }
+
+        // Hysteresis: if we were in a "good" state and just lost detection for 1-2 frames,
+        // keep the previous status — prevents flicker between detecting/not-found
+        const prevStatus = lastStatusRef.current;
+        const wasGood = prevStatus === 'stabilizing' || prevStatus === 'ready' || prevStatus === 'detecting';
+        if (status === 'not-found' && wasGood && noDetectFrames.current < 3) {
+          status = prevStatus; // hold previous status
         }
 
         // Keep ref in sync for the render loop (avoids stale closure on detectionStatus state)
@@ -275,6 +303,28 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
           lastCornersRef.current = null;
         }
 
+        // Update smoothed corners for overlay (EMA — prevents blink/jitter)
+        const rawForSmooth = lastCornersRef.current;
+        if (rawForSmooth) {
+          noDetectFrames.current = 0;
+          if (!smoothedCornersRef.current) {
+            // First detection: snap immediately (no previous position to blend from)
+            smoothedCornersRef.current = rawForSmooth;
+          } else {
+            // EMA: alpha controls responsiveness vs smoothness
+            // 0.35 = smooth enough to suppress jitter, responsive enough to track motion
+            smoothedCornersRef.current = emaCorners(smoothedCornersRef.current, rawForSmooth, 0.35);
+          }
+        } else {
+          // No detection: increment miss counter
+          noDetectFrames.current++;
+          // Only clear smoothed corners after 8 consecutive misses (~1.2s at 150ms interval)
+          // This prevents blink when detector briefly loses track for 1-2 frames
+          if (noDetectFrames.current >= 8) {
+            smoothedCornersRef.current = null;
+          }
+        }
+
         // 9. Auto capture trigger
         if (shouldCapture && !captureInFlight.current) {
           captureInFlight.current = true;
@@ -292,9 +342,13 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
         drawOverlay(overlay, video, null, 'not-found', true);
         flashFrameRef.current = false;
       } else {
-        // Use ref value (not React state) to avoid stale closure issue
-        const renderStatus: DetectionStatus = captureInFlight.current ? 'capturing' : lastStatusRef.current;
-        drawOverlay(overlay, video, lastCornersRef.current, renderStatus);
+        // Use smoothed corners (EMA) — eliminates blink/jitter
+        // Use ref status (not React state) — avoids stale closure
+        const renderCorners = smoothedCornersRef.current;
+        const renderStatus: DetectionStatus = captureInFlight.current
+          ? 'capturing'
+          : (renderCorners ? lastStatusRef.current : 'not-found');
+        drawOverlay(overlay, video, renderCorners, renderStatus);
       }
     };
 
@@ -408,6 +462,8 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
       stopStream(streamRef.current);
       streamRef.current = null;
       detectionRunning.current = false;
+      smoothedCornersRef.current = null;
+      noDetectFrames.current = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -443,6 +499,8 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
     captureInFlight.current = false;
     stabilityRef.current.reset();
     captureCtrlRef.current.reset();
+    smoothedCornersRef.current = null;
+    noDetectFrames.current = 0;
     setScanState('searching');
   }, []);
 

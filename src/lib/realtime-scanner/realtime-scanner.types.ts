@@ -63,9 +63,9 @@ export interface StabilityConfig {
 
 export const DEFAULT_STABILITY_CONFIG: StabilityConfig = {
   minimumStableFrames: 4,
-  maximumCornerDisplacement: 0.012,
+  maximumCornerDisplacement: 0.025,  // 55px at 1080p — tolerates natural hand tremor
   minimumConfidence: 0.38,
-  maximumAreaVariation: 0.06,
+  maximumAreaVariation: 0.08,        // slightly looser to handle minor zoom changes
   stableDurationMs: 600,
 };
 
