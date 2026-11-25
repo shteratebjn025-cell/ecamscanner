@@ -106,14 +106,19 @@ function quadArea(pts: Point[]): number {
   return Math.abs(area) / 2;
 }
 
+/**
+ * Per-side edge support check — returns overall and minimum side support.
+ * Rejects quads with a "missing" edge.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function edgeSupportFromMat(edgeMat: any, pts: Point[]): number {
+function edgeSupportFromMat(edgeMat: any, pts: Point[]): { overall: number; minSide: number } {
   const W = edgeMat.cols, H = edgeMat.rows;
-  let total = 0, hits = 0;
   const n = pts.length;
+  const sides: number[] = [];
   for (let i = 0; i < n; i++) {
     const p0 = pts[i], p1 = pts[(i + 1) % n];
     const steps = Math.max(1, Math.round(Math.hypot(p1.x - p0.x, p1.y - p0.y)));
+    let total = 0, hits = 0;
     for (let t = 0; t <= steps; t++) {
       const x = Math.round(p0.x + (p1.x - p0.x) * t / steps);
       const y = Math.round(p0.y + (p1.y - p0.y) * t / steps);
@@ -128,8 +133,9 @@ function edgeSupportFromMat(edgeMat: any, pts: Point[]): number {
       }
       if (found) hits++;
     }
+    sides.push(total > 0 ? hits / total : 0);
   }
-  return total > 0 ? hits / total : 0;
+  return { overall: sides.reduce((s, v) => s + v, 0) / n, minSide: Math.min(...sides) };
 }
 
 function computeConfidence(areaRatio: number, support: number, ar: number): number {
@@ -239,7 +245,9 @@ function runOpenCVDetection(img: HTMLImageElement): DetectionResult {
       if (ptArr.some(p => p.x < margin || p.y < margin || p.x > W - margin || p.y > H - margin)) continue;
 
       const areaRatio = quadArea(ptArr) / frameArea;
-      const support   = edgeSupportFromMat(closed, ptArr);
+      const { overall: support, minSide } = edgeSupportFromMat(closed, ptArr);
+      if (minSide < 0.25) continue;        // missing side → not a real document edge
+      if (areaRatio > 0.80) continue;      // too large → probably detecting the laptop/table
       const confidence = computeConfidence(areaRatio, support, ar);
 
       if (confidence > 0.10) {

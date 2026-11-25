@@ -180,16 +180,19 @@ function quadArea(pts: Point[]): number {
 
 /**
  * Measure what fraction of the quad perimeter lies on detected edges.
- * Uses the dilated edge image for tolerance.
+ * Also returns per-side support — used to reject quads with a "missing" edge
+ * (e.g. one side of the document is off-screen or blends into the background).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function edgeSupportFromMat(edgeMat: any, pts: Point[]): number {
+function edgeSupportFromMat(edgeMat: any, pts: Point[]): { overall: number; minSide: number } {
   const W = edgeMat.cols, H = edgeMat.rows;
-  let total = 0, hits = 0;
   const n = pts.length;
+  const sideSupports: number[] = [];
+
   for (let i = 0; i < n; i++) {
     const p0 = pts[i], p1 = pts[(i + 1) % n];
     const steps = Math.max(1, Math.round(Math.hypot(p1.x - p0.x, p1.y - p0.y)));
+    let total = 0, hits = 0;
     for (let t = 0; t <= steps; t++) {
       const x = Math.round(p0.x + (p1.x - p0.x) * t / steps);
       const y = Math.round(p0.y + (p1.y - p0.y) * t / steps);
@@ -206,8 +209,12 @@ function edgeSupportFromMat(edgeMat: any, pts: Point[]): number {
       }
       if (found) hits++;
     }
+    sideSupports.push(total > 0 ? hits / total : 0);
   }
-  return total > 0 ? hits / total : 0;
+
+  const overall = sideSupports.reduce((s, v) => s + v, 0) / n;
+  const minSide = Math.min(...sideSupports);
+  return { overall, minSide };
 }
 
 function computeConfidence(areaRatio: number, support: number, ar: number): number {
@@ -339,7 +346,16 @@ export function detectWithOpenCV(
       if (ptArr.some(p => p.x < margin || p.y < margin || p.x > W - margin || p.y > H - margin)) continue;
 
       const areaRatio = quadArea(ptArr) / frameArea;
-      const support   = edgeSupportFromMat(closed, ptArr);
+      const { overall: support, minSide } = edgeSupportFromMat(closed, ptArr);
+
+      // Reject if any single side has very weak edge support (< 25%)
+      // This catches quads where one side is "invisible" (e.g. background blends)
+      if (minSide < 0.25) continue;
+
+      // Penalise quads that fill nearly the entire frame — likely detecting the
+      // surrounding table/laptop rather than the document itself
+      if (areaRatio > 0.80) continue;
+
       const conf      = computeConfidence(areaRatio, support, ar);
 
       if (conf > bestConf) {

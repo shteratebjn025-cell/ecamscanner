@@ -309,6 +309,7 @@ function findBestQuad(
           const area = quadArea(pts);
           const areaRatio = area / (W * H);
           if (areaRatio < 0.06) continue;
+          if (areaRatio > 0.80) continue;  // too large → likely frame boundary / laptop
 
           if (!isConvex(pts)) continue;
 

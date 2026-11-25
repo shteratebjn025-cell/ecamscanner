@@ -113,24 +113,25 @@ async function applyPreset(
 // any lighting condition — same quality as CamScanner's OmnisFix.
 //
 // Algorithm:
-//   1. Convert to Lab-like (use luminance channel Y)
-//   2. Estimate the paper/background color using a large Gaussian blur
-//      (background model). The blur radius must be large enough to span
-//      entire shadow gradients but not bleed into ink.
-//   3. Divide each pixel's luminance by the background estimate:
-//      normalized = (Y / bg_Y) * target_white
-//      This "flattens" the illumination — shadows disappear, paper becomes white.
-//   4. Apply the same ratio to R, G, B channels (preserves color of ink/stamps)
-//   5. Auto-stretch the result to fill 0–255
-//   6. Apply mild sharpening to restore text crispness after division smoothing
+//   1. Per-channel background estimation via large Gaussian-approximated blur
+//      (separable box blur, radius = 20% of shorter dimension).
+//      Radius harus cukup besar untuk mencakup gradient bayangan seluruh dokumen.
+//   2. Divide each pixel by its local background estimate → flattens illumination.
+//   3. Scale so the BRIGHTEST pixels in the result land at 252 (near-white).
+//      This is more aggressive than a fixed target because it adapts to
+//      photos taken in dim/warm/uneven lighting.
+//   4. Post-process: auto-levels (1% clip) → contrast boost → unsharp mask.
 //
-// This is the classical "divide by background" document enhancement technique
-// used in all professional document scanners.
+// Key differences from previous version:
+//   - Radius 20% (was 15%) — better handles wide shadow gradients
+//   - Per-image white point calibration instead of fixed target=245
+//   - Stronger contrast (amount=40, was 30) and sharpen (strength=1.5, was 1.2)
+//   - autoLevels clip 0.01 (was 0.005) — more aggressive white clipping
 
 function presetOmnisFix(src: ImageData, w: number, h: number): ImageData {
   const data = new Uint8ClampedArray(src.data);
 
-  // 1. Extract per-channel arrays for processing
+  // 1. Extract per-channel arrays
   const R = new Float32Array(w * h);
   const G = new Float32Array(w * h);
   const B = new Float32Array(w * h);
@@ -140,36 +141,50 @@ function presetOmnisFix(src: ImageData, w: number, h: number): ImageData {
     B[i] = data[i*4+2];
   }
 
-  // 2. Background estimation: large blur on each channel
-  //    Radius = 15% of shorter dimension, min 20px
-  const radius = Math.max(20, Math.round(Math.min(w, h) * 0.15));
+  // 2. Background estimation — large radius captures shadow gradients
+  //    20% of shorter dimension (was 15%) for more complete illumination model
+  const radius = Math.max(30, Math.round(Math.min(w, h) * 0.20));
   const bgR = fastBoxBlurGray(R, w, h, radius);
   const bgG = fastBoxBlurGray(G, w, h, radius);
   const bgB = fastBoxBlurGray(B, w, h, radius);
 
   // 3. Divide by background → normalize illumination
-  //    target = 240 (slightly off-white, preserves paper texture hint)
-  const target = 245;
-  const eps    = 1; // prevent division by zero
+  //    Use a fixed multiplier of 255 then find the actual white point
+  const eps = 1;
+  const norm = new Float32Array(w * h * 3);
+  let maxLum = 0;
 
   for (let i = 0; i < w * h; i++) {
-    // Scale each channel so that background → target white
-    const nr = Math.round((R[i] / Math.max(eps, bgR[i])) * target);
-    const ng = Math.round((G[i] / Math.max(eps, bgG[i])) * target);
-    const nb = Math.round((B[i] / Math.max(eps, bgB[i])) * target);
-    data[i*4  ] = clamp255(nr);
-    data[i*4+1] = clamp255(ng);
-    data[i*4+2] = clamp255(nb);
+    const nr = (R[i] / Math.max(eps, bgR[i])) * 255;
+    const ng = (G[i] / Math.max(eps, bgG[i])) * 255;
+    const nb = (B[i] / Math.max(eps, bgB[i])) * 255;
+    norm[i*3  ] = nr;
+    norm[i*3+1] = ng;
+    norm[i*3+2] = nb;
+    // Track brightest luminance to calibrate white point
+    const lum = 0.299*nr + 0.587*ng + 0.114*nb;
+    if (lum > maxLum) maxLum = lum;
   }
 
-  // 4. Auto-stretch result to maximize contrast
-  let imageData = autoLevels(mkImageData(data, w, h), 0.005);
+  // 4. Scale so the white point lands at 252 (nearly pure white)
+  //    This adapts to any lighting — dark room, yellow light, etc.
+  const whiteTarget = 252;
+  const whiteScale  = maxLum > 10 ? whiteTarget / maxLum : 1;
 
-  // 5. Moderate contrast boost to make ink pop
-  imageData = applyContrastLUT(imageData, 30);
+  for (let i = 0; i < w * h; i++) {
+    data[i*4  ] = clamp255(Math.round(norm[i*3  ] * whiteScale));
+    data[i*4+1] = clamp255(Math.round(norm[i*3+1] * whiteScale));
+    data[i*4+2] = clamp255(Math.round(norm[i*3+2] * whiteScale));
+  }
 
-  // 6. Unsharp mask — restore text sharpness lost during blur/divide
-  imageData = unsharpMask(imageData, w, h, 1.2, 1.0);
+  // 5. Auto-levels (1% clip) — corrects residual color cast from warm/cool lighting
+  let imageData = autoLevels(mkImageData(data, w, h), 0.01);
+
+  // 6. Stronger contrast boost — makes ink pop against white background
+  imageData = applyContrastLUT(imageData, 40);
+
+  // 7. Sharper unsharp mask — text crispness after blur/divide softening
+  imageData = unsharpMask(imageData, w, h, 1.5, 1.0);
 
   return imageData;
 }
@@ -229,21 +244,20 @@ function presetBlackWhite(
   h: number,
   settings?: Partial<EnhancementSettings>,
 ): ImageData {
-  const rawBlock = settings?.thresholdBlockSize ?? 21;
+  const rawBlock = settings?.thresholdBlockSize ?? 25;
   const blockSize = rawBlock % 2 === 0 ? rawBlock + 1 : rawBlock;
-  const C = settings?.thresholdC ?? 8;
+  // Higher C = more aggressive (pushes near-white pixels to white, near-black to black)
+  const C = settings?.thresholdC ?? 12;
 
-  // First normalize background illumination — critical for B&W quality
+  // First normalize — critical for consistent B&W under any lighting
   const normalized = presetOmnisFix(src, w, h);
   const data = normalized.data;
 
-  // Grayscale
   const gray = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) {
     gray[i] = 0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2];
   }
 
-  // Local adaptive threshold via integral image
   const mean = localMean(gray, w, h, Math.floor(blockSize / 2));
 
   const out = new Uint8ClampedArray(w * h * 4);
@@ -319,6 +333,8 @@ function presetLighten(src: ImageData, w: number, h: number): ImageData {
 // ─── Shadow Reduction ─────────────────────────────────────────────────────────
 //
 // Most aggressive — for documents with strong shadows (book spine, hand shadow).
+// Uses the same adaptive white-point calibration as OmnisFix but with
+// an even larger blur radius and a cap on scale to prevent noise amplification.
 
 function presetShadowReduction(src: ImageData, w: number, h: number): ImageData {
   const data = new Uint8ClampedArray(src.data);
@@ -330,26 +346,33 @@ function presetShadowReduction(src: ImageData, w: number, h: number): ImageData 
     R[i] = data[i*4]; G[i] = data[i*4+1]; B[i] = data[i*4+2];
   }
 
-  // Large radius for shadow gradients (20% of image)
-  const radius = Math.max(30, Math.round(Math.min(w, h) * 0.20));
+  // Large radius for wide shadow gradients (25% of image)
+  const radius = Math.max(40, Math.round(Math.min(w, h) * 0.25));
   const bgR = fastBoxBlurGray(R, w, h, radius);
   const bgG = fastBoxBlurGray(G, w, h, radius);
   const bgB = fastBoxBlurGray(B, w, h, radius);
 
-  const target = 248; // near-white
+  // Adaptive white point (same as OmnisFix) with cap at 3× to prevent noise
+  let maxLum = 0;
+  const norm = new Float32Array(w * h * 3);
   for (let i = 0; i < w * h; i++) {
-    // Cap scale to 3× to prevent noise amplification in very dark areas
-    const sr = Math.min(3, target / Math.max(1, bgR[i]));
-    const sg = Math.min(3, target / Math.max(1, bgG[i]));
-    const sb = Math.min(3, target / Math.max(1, bgB[i]));
-    data[i*4  ] = clamp255(Math.round(R[i] * sr));
-    data[i*4+1] = clamp255(Math.round(G[i] * sg));
-    data[i*4+2] = clamp255(Math.round(B[i] * sb));
+    const nr = Math.min((R[i] / Math.max(1, bgR[i])) * 255, 255 * 3);
+    const ng = Math.min((G[i] / Math.max(1, bgG[i])) * 255, 255 * 3);
+    const nb = Math.min((B[i] / Math.max(1, bgB[i])) * 255, 255 * 3);
+    norm[i*3] = nr; norm[i*3+1] = ng; norm[i*3+2] = nb;
+    const lum = 0.299*nr + 0.587*ng + 0.114*nb;
+    if (lum > maxLum) maxLum = lum;
+  }
+  const scale = maxLum > 10 ? 252 / maxLum : 1;
+  for (let i = 0; i < w * h; i++) {
+    data[i*4  ] = clamp255(Math.round(norm[i*3  ] * scale));
+    data[i*4+1] = clamp255(Math.round(norm[i*3+1] * scale));
+    data[i*4+2] = clamp255(Math.round(norm[i*3+2] * scale));
   }
 
   let result = autoLevels(mkImageData(data, w, h), 0.01);
-  result = applyContrastLUT(result, 25);
-  result = unsharpMask(result, w, h, 1.0, 1.0);
+  result = applyContrastLUT(result, 35);
+  result = unsharpMask(result, w, h, 1.2, 1.0);
   return result;
 }
 
@@ -359,13 +382,11 @@ function presetShadowReduction(src: ImageData, w: number, h: number): ImageData 
 // Makes text very crisp — equivalent to CamScanner's "Mempertajam".
 
 function presetSharpen(src: ImageData, w: number, h: number): ImageData {
-  // Start from OmnisFix clean base
   let result = presetOmnisFix(src, w, h);
-
-  // Apply two passes of unsharp mask for extra crispness
-  result = unsharpMask(result, w, h, 1.8, 1.0);
-  result = unsharpMask(result, w, h, 0.8, 0.5);
-
+  // Three passes: wide+strong, medium, fine
+  result = unsharpMask(result, w, h, 2.0, 2.0);
+  result = unsharpMask(result, w, h, 1.2, 1.0);
+  result = unsharpMask(result, w, h, 0.6, 0.5);
   return result;
 }
 

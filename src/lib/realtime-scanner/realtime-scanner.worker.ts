@@ -341,6 +341,7 @@ function findBestQuad(
     if (ar<0.12||ar>8) continue;
     const areaRatio = quadArea(pts)/(W*H);
     if (areaRatio<0.06) continue;
+    if (areaRatio>0.80) continue;  // too large → frame/laptop boundary
     if (!isConvex(pts)) continue;
     if (pts.some(p=>p.x<0||p.y<0||p.x>=W||p.y>=H)) continue;
     const support = edgeSupport(edges,W,H,pts);
