@@ -24,6 +24,7 @@ import Button from '@/components/ui/Button';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import type { CropRegion } from '@/types';
 import { useRealtimeScanner } from '@/hooks/useRealtimeScanner';
+import { preloadOpenCV } from '@/lib/image-processing/opencv-full-detector';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,10 @@ export default function CameraView({
 }: CameraViewProps) {
   const videoRef   = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+
+  // Start loading OpenCV.js in background as soon as scanner opens.
+  // It will be ready by the time user takes a photo.
+  preloadOpenCV();
 
   const { state, actions } = useRealtimeScanner({
     videoRef,

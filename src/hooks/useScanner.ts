@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ScannedPage, CropRegion, FilterId, AppStep, EnhancementSettings } from '@/types';
 import { defaultEnhancementSettings, normalizeFilterId } from '@/types';
 import { detectEdges, detectEdgesFull, defaultCropRegion } from '@/lib/image-processing/edge-detection';
+import { detectDocumentOpenCV, preloadOpenCV } from '@/lib/image-processing/opencv-full-detector';
 import { perspectiveCrop } from '@/lib/image-processing/crop';
 import { applyFilter } from '@/lib/image-processing/filters';
 import { saveDocumentEverywhere } from '@/lib/storage/documents';
@@ -91,9 +92,14 @@ export function useScanner() {
         // are already in the correct space for the captured image.
         //
         // Run a full-resolution re-detection pass to refine corner accuracy.
-        // The realtime proxy (400px) can mis-locate corners by several pixels at scale.
-        // The full-res detector uses DETECTION_MAX_DIM=480px with better coverage.
-        const fullResResult = await detectEdgesFull(dataUrl);
+        // Priority: OpenCV.js (findContours) > pure-JS (Canny quad search) > realtime corners
+        let fullResResult = await detectDocumentOpenCV(dataUrl);
+
+        // If OpenCV not ready yet or failed, fall back to pure-JS
+        if (!fullResResult) {
+          fullResResult = await detectEdgesFull(dataUrl);
+        }
+
         if (
           fullResResult.status !== 'not-found' &&
           fullResResult.selected &&
