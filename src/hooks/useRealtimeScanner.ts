@@ -30,7 +30,7 @@ import type { StabilityConfig } from '@/lib/realtime-scanner/realtime-scanner.ty
 
 import { openCamera, stopStream, setTorch, enumerateCameras, classifyError } from '@/lib/realtime-scanner/camera-manager';
 import type { CameraError, OpenCameraResult } from '@/lib/realtime-scanner/camera-manager';
-import { captureProxyFrame, detectDocumentFromImageData } from '@/lib/realtime-scanner/document-detector';
+import { captureProxyFrame } from '@/lib/realtime-scanner/document-detector';
 import { validateQuadrilateral } from '@/lib/realtime-scanner/quadrilateral-validator';
 import { StabilityDetector } from '@/lib/realtime-scanner/stability-detector';
 import { analyzeQuality } from '@/lib/realtime-scanner/image-quality-analyzer';
@@ -195,148 +195,129 @@ export function useRealtimeScanner(options: RealtimeScannerOptions): {
         lastDetectRef.current = now;
         detectionRunning.current = true;
 
-        // 1. Extract proxy frame
-        if (!proxyCanvasRef.current) {
-          proxyCanvasRef.current = document.createElement('canvas');
-        }
-        const proxyResult = captureProxyFrame(video, proxyCanvasRef.current);
-        if (!proxyResult) {
-          detectionRunning.current = false;
-          return;
-        }
-
-        const { imageData, proxyW, proxyH } = proxyResult;
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-
-        // 2. Quality analysis (runs on proxy, cheap)
-        const qual = analyzeQuality(imageData);
-
-        // 3. Detection (worker or main thread)
-        // We clone the imageData before transferring to the worker so quality
-        // analysis can still read it.  The transfer happens in the bridge.
-        let detResult;
         try {
-          // ImageData is already consumed by quality analysis — we need a fresh one.
-          // Re-read the proxy canvas for the worker.
-          const ctx2 = proxyCanvasRef.current.getContext('2d', { willReadFrequently: true });
-          const freshData = ctx2?.getImageData(0, 0, proxyW, proxyH);
-          if (!freshData) throw new Error('no ctx');
-          detResult = await workerBridgeRef.current.detect(freshData, vw, vh);
-        } catch {
-          detResult = { found: false, confidence: 0, corners: null, status: 'not-found' as const };
+          // 1. Extract proxy frame
+          if (!proxyCanvasRef.current) {
+            proxyCanvasRef.current = document.createElement('canvas');
+          }
+          const proxyResult = captureProxyFrame(video, proxyCanvasRef.current);
+          if (!proxyResult) return; // finally will reset detectionRunning
+
+          const { imageData, proxyW, proxyH } = proxyResult;
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+
+          // 2. Quality analysis (runs on proxy, cheap)
+          const qual = analyzeQuality(imageData);
+
+          // 3. Detection (worker or main thread)
+          let detResult;
+          try {
+            const ctx2 = proxyCanvasRef.current.getContext('2d', { willReadFrequently: true });
+            const freshData = ctx2?.getImageData(0, 0, proxyW, proxyH);
+            if (!freshData) throw new Error('no ctx');
+            detResult = await workerBridgeRef.current.detect(freshData, vw, vh);
+          } catch {
+            detResult = { found: false, confidence: 0, corners: null, status: 'not-found' as const };
+          }
+
+          if (unmountedRef.current) return; // finally will reset detectionRunning
+
+          // 4. Validate quadrilateral
+          const rawCorners = detResult.corners;
+          const validCorners =
+            rawCorners && validateQuadrilateral(rawCorners, vw, vh) ? rawCorners : null;
+
+          // 5. Stability
+          const stability = stabilityRef.current.update(
+            validCorners,
+            detResult.confidence,
+            vw,
+            vh,
+            now,
+          );
+
+          // 6. Build detection status for UI
+          let status: DetectionStatus = 'not-found';
+          if (validCorners) {
+            if (stability.isStable) {
+              status = captureInFlight.current ? 'capturing' : 'ready';
+            } else if (stability.stableFrames >= 2) {
+              status = 'stabilizing';
+            } else {
+              status = detResult.status === 'low-confidence' ? 'low-confidence' : 'detecting';
+            }
+          } else if (detResult.corners && detResult.status === 'low-confidence') {
+            status = 'low-confidence';
+          }
+
+          // Status hysteresis: hold good state for up to 2 missed frames
+          const prevStatus = lastStatusRef.current;
+          const wasGood = prevStatus === 'stabilizing' || prevStatus === 'ready' || prevStatus === 'detecting';
+          if (status === 'not-found' && wasGood && noDetectFrames.current < 3) {
+            status = prevStatus;
+          }
+
+          lastStatusRef.current = status;
+
+          // 7. Auto capture gate
+          const shouldCapture = captureCtrlRef.current.evaluate(
+            !!validCorners,
+            detResult.confidence,
+            stability,
+            qual,
+            !!validCorners,
+            now,
+          );
+
+          // 8. Update React state
+          const newScanState = captureCtrlRef.current.currentState;
+          setScanState(prev => prev !== newScanState ? newScanState : prev);
+          setDetectionStatus(prev => prev !== status ? status : prev);
+          setCorners(validCorners);
+          setConfidence(detResult.confidence);
+          setQuality(qual);
+          setStableFrames(stability.stableFrames);
+          setStableDuration(stability.stableDurationMs);
+          setHint(qual.hint || (validCorners ? '' : 'Arahkan kamera ke dokumen'));
+
+          lastCornersRef.current = validCorners;
+          if (!validCorners && status === 'low-confidence' && detResult.corners) {
+            lastCornersRef.current = detResult.corners;
+          }
+          if (status === 'not-found') {
+            lastCornersRef.current = null;
+          }
+
+          // EMA smoothing for overlay
+          if (validCorners) {
+            noDetectFrames.current = 0;
+            smoothedCornersRef.current = smoothedCornersRef.current
+              ? emaCorners(smoothedCornersRef.current, validCorners, 0.35)
+              : validCorners;
+          } else if (detResult.corners && detResult.status === 'low-confidence') {
+            noDetectFrames.current = 0;
+            smoothedCornersRef.current = smoothedCornersRef.current
+              ? emaCorners(smoothedCornersRef.current, detResult.corners, 0.25)
+              : detResult.corners;
+          } else {
+            noDetectFrames.current++;
+            if (noDetectFrames.current >= 8) smoothedCornersRef.current = null;
+          }
+
+          // 9. Auto capture trigger
+          if (shouldCapture && !captureInFlight.current) {
+            captureInFlight.current = true;
+            flashFrameRef.current = true;
+            setTimeout(() => {
+              if (!unmountedRef.current) executeCapture(video, lastCornersRef.current);
+            }, 80);
+          }
+
+        } finally {
+          // Always release the guard — no matter what path we took above
           detectionRunning.current = false;
         }
-
-        if (unmountedRef.current) return;
-
-        // 4. Validate quadrilateral
-        const rawCorners = detResult.corners;
-        const validCorners =
-          rawCorners && validateQuadrilateral(rawCorners, vw, vh) ? rawCorners : null;
-
-        // 5. Stability
-        const stability = stabilityRef.current.update(
-          validCorners,
-          detResult.confidence,
-          vw,
-          vh,
-          now,
-        );
-
-        // 6. Build detection status for UI
-        // Status hysteresis: once stabilizing/ready, don't snap back to detecting
-        // on a single missed frame — require noDetectFrames >= 3 to downgrade
-        let status: DetectionStatus = 'not-found';
-        if (validCorners) {
-          if (stability.isStable) {
-            status = captureInFlight.current ? 'capturing' : 'ready';
-          } else if (stability.stableFrames >= 2) {
-            status = 'stabilizing';
-          } else {
-            status = detResult.status === 'low-confidence' ? 'low-confidence' : 'detecting';
-          }
-        } else if (detResult.corners && detResult.status === 'low-confidence') {
-          status = 'low-confidence';
-        }
-
-        // Hysteresis: if we were in a "good" state and just lost detection for 1-2 frames,
-        // keep the previous status — prevents flicker between detecting/not-found
-        const prevStatus = lastStatusRef.current;
-        const wasGood = prevStatus === 'stabilizing' || prevStatus === 'ready' || prevStatus === 'detecting';
-        if (status === 'not-found' && wasGood && noDetectFrames.current < 3) {
-          status = prevStatus; // hold previous status
-        }
-
-        // Keep ref in sync for the render loop (avoids stale closure on detectionStatus state)
-        lastStatusRef.current = status;
-
-        // 7. Auto capture gate
-        const cornersVisible = !!validCorners;
-        const shouldCapture = captureCtrlRef.current.evaluate(
-          !!validCorners,
-          detResult.confidence,
-          stability,
-          qual,
-          cornersVisible,
-          now,
-        );
-
-        // 8. Update React state (batch — only when values changed)
-        const newScanState = captureCtrlRef.current.currentState;
-        setScanState(prev => prev !== newScanState ? newScanState : prev);
-        setDetectionStatus(prev => prev !== status ? status : prev);
-        setCorners(validCorners);
-        setConfidence(detResult.confidence);
-        setQuality(qual);
-        setStableFrames(stability.stableFrames);
-        setStableDuration(stability.stableDurationMs);
-        setHint(qual.hint || (validCorners ? '' : 'Arahkan kamera ke dokumen'));
-
-        lastCornersRef.current = validCorners;
-        // For low-confidence display: use raw corners even if quad validation failed
-        if (!validCorners && status === 'low-confidence' && detResult.corners) {
-          lastCornersRef.current = detResult.corners;
-        }
-        // Clear corners when nothing detected so stale corners never linger
-        if (status === 'not-found') {
-          lastCornersRef.current = null;
-        }
-
-        // Update smoothed corners for overlay (EMA — prevents blink/jitter)
-        // Input: validCorners (the actual detection result, independent of status hysteresis)
-        if (validCorners) {
-          noDetectFrames.current = 0;
-          if (!smoothedCornersRef.current) {
-            smoothedCornersRef.current = validCorners;
-          } else {
-            smoothedCornersRef.current = emaCorners(smoothedCornersRef.current, validCorners, 0.35);
-          }
-        } else if (detResult.corners && detResult.status === 'low-confidence') {
-          // Low-confidence: also smooth, but increment miss for clearing purposes
-          noDetectFrames.current = 0;
-          if (!smoothedCornersRef.current) {
-            smoothedCornersRef.current = detResult.corners;
-          } else {
-            smoothedCornersRef.current = emaCorners(smoothedCornersRef.current, detResult.corners, 0.25);
-          }
-        } else {
-          noDetectFrames.current++;
-          if (noDetectFrames.current >= 8) {
-            smoothedCornersRef.current = null;
-          }
-        }
-
-        // 9. Auto capture trigger
-        if (shouldCapture && !captureInFlight.current) {
-          captureInFlight.current = true;
-          flashFrameRef.current = true;
-          setTimeout(() => {
-            if (!unmountedRef.current) executeCapture(video, lastCornersRef.current);
-          }, 80); // brief delay for the flash frame to render
-        }
-
-        detectionRunning.current = false;
       }
 
       // ── Render overlay every RAF tick ────────────────────────────────────
